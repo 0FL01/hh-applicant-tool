@@ -23,7 +23,6 @@ from . import ai, api, utils
 from .storage import StorageFacade
 from .utils.cookiejar import HHOnlyCookieJar
 from .utils.log import setup_logger
-from .utils.mixins import MegaTool
 
 DEFAULT_CONFIG_DIR = utils.get_config_path() / (__package__ or "").replace(
     "_", "-"
@@ -59,7 +58,7 @@ class BaseNamespace(argparse.Namespace):
     proxy_url: str
 
 
-class HHApplicantTool(MegaTool):
+class HHApplicantTool:
     """Утилита для автоматизации действий соискателя на сайте hh.ru.
 
     Исходники и предложения: <https://github.com/s3rgeym/hh-applicant-tool>
@@ -368,50 +367,43 @@ class HHApplicantTool(MegaTool):
 
         utils.setup_terminal()
 
-        try:
-            if self.args.run:
-                try:
-                    return self.args.run(self)
-                except KeyboardInterrupt:
-                    logger.warning("Выполнение прервано пользователем!")
-                except api.errors.CaptchaRequired as ex:
-                    logger.error(f"Требуется ввод капчи: {ex.captcha_url}")
-                except api.errors.InternalServerError:
-                    logger.error(
-                        "Сервер HH.RU не смог обработать запрос из-за высокой"
-                        " нагрузки или по иной причине"
-                    )
-                except api.errors.Forbidden:
-                    logger.error("Требуется авторизация")
-                except sqlite3.Error as ex:
-                    logger.exception(ex)
-
-                    script_name = sys.argv[0].split(os.sep)[-1]
-
-                    logger.warning(
-                        f"Возможно база данных повреждена, попробуйте выполнить команду:\n\n"  # noqa: E501
-                        f"  {script_name} migrate-db"
-                    )
-                except Exception as e:
-                    logger.exception(e)
-                finally:
-                    # Токен мог автоматически обновиться
-                    if self.save_token():
-                        logger.info("Токен был сохранен после обновления.")
-
-                    try:
-                        self.save_cookies()
-                    except Exception as ex:
-                        logger.error(f"Не удалось сохранить cookies: {ex}")
-                return 1
-            self._parser.print_help(file=sys.stderr)
-            return 2
-        finally:
+        if self.args.run:
             try:
-                self._check_system()
-            except Exception:
-                pass
-                # raise
+                return self.args.run(self)
+            except KeyboardInterrupt:
+                logger.warning("Выполнение прервано пользователем!")
+            except api.errors.CaptchaRequired as ex:
+                logger.error(f"Требуется ввод капчи: {ex.captcha_url}")
+            except api.errors.InternalServerError:
+                logger.error(
+                    "Сервер HH.RU не смог обработать запрос из-за высокой"
+                    " нагрузки или по иной причине"
+                )
+            except api.errors.Forbidden:
+                logger.error("Требуется авторизация")
+            except sqlite3.Error as ex:
+                logger.exception(ex)
+
+                script_name = sys.argv[0].split(os.sep)[-1]
+
+                logger.warning(
+                    f"Возможно база данных повреждена, попробуйте выполнить команду:\n\n"  # noqa: E501
+                    f"  {script_name} migrate-db"
+                )
+            except Exception as e:
+                logger.exception(e)
+            finally:
+                # Токен мог автоматически обновиться
+                if self.save_token():
+                    logger.info("Токен был сохранен после обновления.")
+
+                try:
+                    self.save_cookies()
+                except Exception as ex:
+                    logger.error(f"Не удалось сохранить cookies: {ex}")
+            return 1
+        self._parser.print_help(file=sys.stderr)
+        return 2
 
     def _parse_args(self, argv) -> None:
         self._parser = self._create_parser()

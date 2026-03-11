@@ -1,24 +1,11 @@
 # HH Applicant Tool
 
-> [!NOTE]
-> Ищу почасовую или проектную [@feedback_s3rgeym_bot](https://t.me/feedback_s3rgeym_bot) (Python, Vue.js, Devops).
-
-![Publish to PyPI](https://github.com/s3rgeym/hh-applicant-tool/actions/workflows/publish.yml/badge.svg)
+![Publish to PyPI](https://github.com/user-attachments/assets/s3rgeym/hh-applicant-tool/actions/workflows/publish.yml/badge.svg)
 [![PyPi Version](https://img.shields.io/pypi/v/hh-applicant-tool)]()
 [![Python Versions](https://img.shields.io/pypi/pyversions/hh-applicant-tool.svg)]()
 [![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/s3rgeym/hh-applicant-tool)]()
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/hh-applicant-tool)]()
 [![Total Downloads](https://static.pepy.tech/badge/hh-applicant-tool)]()
-
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/29d91490-2c83-4e3f-a573-c7a6182a4044" width="500">
-</div>
-
-### ☕ Поддержать проект
-
-[![Donate BTC](https://img.shields.io/badge/Donate-BTC-orange?style=for-the-badge&logo=bitcoin&logoColor=white)](bitcoin:BC1QWQXZX6D5Q0J5QVGH2VYXTFXX9Y6EPPGCW3REHS?label=%D0%94%D0%BB%D1%8F%20%D0%BF%D0%BE%D0%B6%D0%B5%D1%80%D1%82%D0%B2%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B9)
-
-**BTC Address:** `BC1QWQXZX6D5Q0J5QVGH2VYXTFXX9Y6EPPGCW3REHS`
 
 ---
 
@@ -82,7 +69,6 @@
     - [cookies.txt](#cookiestxt)
   - [Отправка писем при отклике](#отправка-писем-при-отклике)
   - [Использование в скриптах](#использование-в-скриптах)
-  - [Дополнительные настройки](#дополнительные-настройки)
   - [Лицензионное соглашение (Limited Non-Commercial License)](#лицензионное-соглашение-limited-non-commercial-license)
 
 ---
@@ -1021,27 +1007,6 @@ tool.save_token()
 📨 Код был отправлен. Проверьте почту или SMS.
 📩 Введите полученный код:
 ```
-
----
-
-## Дополнительные настройки
-
-<details>
-<summary>Если вы обычный пользователь, то ничего лучше не трогайте.</summary>
-
-Отключение проверки версии с выводом предупреждения:
-
-```sh
-hh-applicant-tool settings disable_version_check true
-```
-
-Утилита ищет в логах информацию о Python-ошибках. Они отправляются на сервер разработчика с целью их оперативного исправления, однако, вы можете отключить отправку отчетов:
-
-```sh
-hh-applicant-tool settings send_error_reports false
-```
-
-</details>
 
 ---
 
