@@ -10,6 +10,8 @@ services:
       # Пробрасываем таймзону хоста
       - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
       # Это не трогаем
       - CONFIG_DIR=/app/config
