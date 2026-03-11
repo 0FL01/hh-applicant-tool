@@ -571,9 +571,20 @@ class Operation(BaseOperation):
                         logger.debug("prompt: %s", msg)
                         letter = self.openai_chat.send_message(msg)
                     else:
-                        letter = (
-                            rand_text(self.cover_letter) % message_placeholders
-                        )
+                        try:
+                            letter = (
+                                rand_text(self.cover_letter)
+                                % message_placeholders
+                            )
+                        except (KeyError, TypeError) as ex:
+                            logger.warning(
+                                "Не удалось подставить плейсхолдеры в сопроводительное письмо: %s. "
+                                "Используется исходный текст без подстановки. "
+                                "Доступные плейсхолдеры: %s",
+                                ex,
+                                list(message_placeholders.keys()),
+                            )
+                            letter = rand_text(self.cover_letter)
 
                     logger.debug(letter)
 
