@@ -259,16 +259,20 @@ class ChatAgentService:
         negotiation_id: str | int,
         last_message_id: str,
     ) -> bool:
-        return (
-            next(
-                self.tool.storage.agent_decisions.find(
-                    negotiation_id=int(negotiation_id),
-                    last_message_id=str(last_message_id),
-                ),
-                None,
-            )
-            is not None
+        decision = next(
+            self.tool.storage.agent_decisions.find(
+                negotiation_id=int(negotiation_id),
+                last_message_id=str(last_message_id),
+            ),
+            None,
         )
+        if decision is None:
+            return False
+        if decision.run_id:
+            run = self.tool.storage.agent_runs.get(decision.run_id)
+            if run and run.dry_run:
+                return False
+        return True
 
     def _save_messages(self, negotiation: dict, messages: list[dict]) -> None:
         items = []
@@ -309,6 +313,8 @@ class ChatAgentService:
         raw_response: str,
         reasoning_details,
     ) -> None:
+        if self.config.dry_run:
+            return
         vacancy = negotiation.get("vacancy") or {}
         employer = vacancy.get("employer") or {}
         self.tool.storage.agent_decisions.save(
