@@ -322,10 +322,16 @@ OPENROUTER_API_KEY=your_openrouter_api_key_here
 
 ### Запуск агента в режиме dry-run
 
-Для безопасного тестирования без реальной отправки сообщений:
+Для безопасного тестирования без реальной отправки сообщений (переопределяем команду):
 
 ```sh
 docker compose -f docker-compose.llm-agent.yml run --rm llm_agent chat-agent --dry-run --limit 5
+```
+
+Или с временным включением dry-run через переменную окружения:
+
+```sh
+docker compose -f docker-compose.llm-agent.yml run --rm -e CHAT_AGENT_DRY_RUN=true llm_agent chat-agent --limit 5
 ```
 
 ### Демонный запуск (background)
@@ -356,11 +362,12 @@ docker compose -f docker-compose.llm-agent.yml up -d --build llm_agent
 
 ### Особенности
 
-- Контейнер работает от пользователя `llmagent` (UID/GID 1000 по умолчанию)
-- Конфиги и база данных хранятся в `config/` как и при локальном запуске
-- По умолчанию контейнер запускает именно daemon-режим агента
-- Частота опроса задается через `CHAT_AGENT_POLL_INTERVAL`
+- Контейнер работает от пользователя `llmagent` (UID/GID 1000 по умолчанию, можно изменить через `UID`/`GID` build args)
+- Конфиги и база данных хранятся в `config/` как и при локальном запуске (через volume mount `.:/app`)
+- По умолчанию контейнер запускает именно daemon-режим агента (`chat-agent --daemon`)
+- Частота опроса задается через `CHAT_AGENT_POLL_INTERVAL` (по умолчанию 60 секунд)
 - Модель по умолчанию: `google/gemini-3.1-flash-lite-preview`
+- При использовании `run --rm` с другими командами (например, `--dry-run`) стандартная daemon-команда переопределяется
 
 ---
 

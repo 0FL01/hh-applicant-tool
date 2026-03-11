@@ -5,7 +5,7 @@ CLI-утилита для автоматизации действий соиск
 Сейчас в проекте есть отдельный LLM-модуль для автоответов в чатах работодателей через OpenRouter. Он живет отдельно от основного пакета, но запускается через обычный CLI `hh-applicant-tool chat-agent`.
 
 **Tech Stack:**
-- Language: Python 3.13
+- Language: Python 3.11+
 - Packaging: Poetry (`pyproject.toml`), entrypoint `hh-applicant-tool`
 - Packages: основной пакет `src/hh_applicant_tool/` + отдельный root-level пакет `hh_llm_agent/`
 - Key libs: `requests`, `openai`, `playwright` (optional), `prettytable`, `pillow` (optional)
@@ -76,37 +76,38 @@ The default branch is `main`.
 - **Error handling**: в `HHApplicantTool.run()` централизованно обрабатываются API/SQLite/runtime исключения, лог пишется в профильный `log.txt`.
 - **Typing/linting**: pyright включен в режиме `off`; основной линтинг через `ruff` и `pylint`.
 - **Tests**: использовать `pytest` (основной smoke check перед изменениями в логике).
-- **OpenRouter defaults**: базовая модель по умолчанию - `google/gemini-3.1-flash-lite-preview`, reasoning включен по умолчанию.
+- **OpenRouter defaults**: базовая модель по умолчанию - `google/gemini-3.1-flash-lite-preview`, reasoning включен по умолчанию, max_completion_tokens=1200, max_history_messages=12, temperature=0.2.
 
 ## Runtime Notes for Agents
 
 ### Chat Agent Config Sources
 - CLI flags in `chat-agent`
 - `config.json` keys:
-  - `openrouter.api_key`
-  - `openrouter.model`
-  - `openrouter.base_url`
-  - `openrouter.temperature`
-  - `openrouter.max_completion_tokens`
-  - `openrouter.reasoning_enabled`
-  - `chat_agent.system_prompt`
-  - `chat_agent.reply_instruction`
-  - `chat_agent.max_history_messages`
-  - `chat_agent.period_days`
-  - `chat_agent.only_invitations`
-  - `chat_agent.dry_run`
-  - `chat_agent.limit`
-  - `chat_agent.resume_id`
-  - `chat_agent.skip_blacklisted`
+  - `openrouter.api_key` (обязателен)
+  - `openrouter.model` (дефолт: `google/gemini-3.1-flash-lite-preview`)
+  - `openrouter.base_url` (дефолт: `https://openrouter.ai/api/v1`)
+  - `openrouter.temperature` (дефолт: 0.2)
+  - `openrouter.max_completion_tokens` (дефолт: 1200)
+  - `openrouter.reasoning_enabled` (дефолт: true)
+  - `chat_agent.system_prompt` (есть дефолт на русском)
+  - `chat_agent.reply_instruction` (есть дефолт)
+  - `chat_agent.max_history_messages` (дефолт: 12)
+  - `chat_agent.period_days` (дефолт: None - без фильтра)
+  - `chat_agent.only_invitations` (дефолт: false)
+  - `chat_agent.dry_run` (дефолт: false)
+  - `chat_agent.limit` (дефолт: None - без лимита)
+  - `chat_agent.resume_id` (дефолт: None - все резюме)
+  - `chat_agent.skip_blacklisted` (дефолт: true)
+  - `chat_agent.force` (дефолт: false)
 - Environment variables from `.env.example`:
-  - `OPENROUTER_API_KEY`
+  - `OPENROUTER_API_KEY` (обязателен)
   - `OPENROUTER_MODEL`
   - `OPENROUTER_BASE_URL`
   - `CHAT_AGENT_TEMPERATURE`
-  - `CHAT_AGENT_DRY_RUN`
-  - `CHAT_AGENT_POLL_INTERVAL`
-  - `CHAT_AGENT_MAX_COMPLETION_TOKENS`
-  - `CHAT_AGENT_MAX_HISTORY_MESSAGES`
+  - `CHAT_AGENT_DRY_RUN` (альтернатива: `HH_AGENT_DRY_RUN`)
+  - `CHAT_AGENT_POLL_INTERVAL` (дефолт: 60 секунд)
+  - `CHAT_AGENT_MAX_COMPLETION_TOKENS` (дефолт: 1200)
+  - `CHAT_AGENT_MAX_HISTORY_MESSAGES` (дефолт: 12)
   - `CHAT_AGENT_PERIOD_DAYS`
   - `CHAT_AGENT_SYSTEM_PROMPT`
   - `CHAT_AGENT_REPLY_INSTRUCTION`
