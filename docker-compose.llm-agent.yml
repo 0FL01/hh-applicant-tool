@@ -1,0 +1,48 @@
+services:
+  llm_agent:
+    container_name: hh_llm_agent
+    image: hh_llm_agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.llm-agent
+    volumes:
+      - .:/app
+      # Пробрасываем таймзону хоста
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Директория для конфигов (база данных, tokens, cookies)
+      - CONFIG_DIR=/app/config
+      # Смените или закомментируйте при проблемах с терминалом
+      - TERM=${TERM}
+      # Если время на сервере отличается от времени в контейнере
+      # - TZ=Europe/Moscow
+      # Для логирования (увеличивайте количество флагов -v для отладки)
+      - HH_LOG_LEVEL=INFO
+      # По умолчанию dry-run для безопасного тестирования
+      # Установите в 0 для реальной отправки сообщений
+      - HH_AGENT_DRY_RUN=1
+
+  # Опционально: можно добавить сервис для одноразового запуска агента
+  llm_agent_run:
+    container_name: hh_llm_agent_run
+    image: hh_llm_agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.llm-agent
+    volumes:
+      - .:/app
+      - /etc/localtime:/etc/localtime:ro
+    env_file:
+      - .env
+    environment:
+      - CONFIG_DIR=/app/config
+      - TERM=${TERM}
+    # Запускает агент один раз и завершает работу
+    command: ["chat-agent", "--dry-run", "--limit", "10"]
+    # Не перезапускается автоматически (одноразовый запуск)
+    restart: "no"
+    profiles:
+      - oneshot

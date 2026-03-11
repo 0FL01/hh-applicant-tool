@@ -1,0 +1,35 @@
+FROM python:3.13-slim
+
+# Системные зависимости
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  gcc \
+  libc6-dev \
+  tzdata \
+  && rm -rf /var/lib/apt/lists/*
+
+# Настройка пользователя для безопасности
+ARG UID=1000
+ARG GID=1000
+RUN groupadd -g $GID llmagent && \
+  useradd -u $UID -g llmagent -m -s /bin/bash llmagent
+
+WORKDIR /app
+
+# Копируем файлы пакета
+COPY src /app/src
+COPY hh_llm_agent /app/hh_llm_agent
+COPY pyproject.toml poetry.lock* README.md .env.example /app/
+
+# Устанавливаем зависимости (без playwright и pillow - не нужны для LLM агента)
+RUN pip install --no-cache-dir -e .
+
+# Создаем директорию для конфигов с правами пользователя
+RUN mkdir -p /app/config && \
+  chown -R llmagent:llmagent /app
+
+# Переключаемся на пользователя
+USER llmagent
+
+# Запускаем агента (по умолчанию с --help для проверки)
+ENTRYPOINT ["python", "-m", "hh_applicant_tool"]
+CMD ["chat-agent", "--help"]

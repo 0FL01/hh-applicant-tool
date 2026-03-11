@@ -1,12 +1,62 @@
+# Virtual environments
 .venv
-.vscode
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
 .git
-.github
+.gitignore
+.gitattributes
+.github/
+
+# Python
 __pycache__
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Poetry
+poetry.lock
+
+# Environment variables (секреты!)
+.env
+.env.*
+
+# Logs
+config/log*.txt
+config/data/
+*.log
+
+# Tests и документация
 tests
 docs
-.pytest_cache
-*.egg-info
-dist
-build
+test_*.py
+collect_traceback_logs.py
+binpack.py
+
+# Docker (чтобы не копировать саму себя)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime артефакты (создаются в контейнере)
+config/

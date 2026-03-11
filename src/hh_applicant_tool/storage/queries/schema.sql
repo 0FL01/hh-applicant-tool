@@ -68,6 +68,48 @@ CREATE TABLE IF NOT EXISTS negotiations (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+/* ===================== chat_messages ===================== */
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id TEXT PRIMARY KEY,
+    negotiation_id INTEGER NOT NULL,
+    chat_id INTEGER,
+    participant_type TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at DATETIME,
+    viewed_by_opponent BOOLEAN
+);
+/* ===================== agent_runs ===================== */
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    model TEXT,
+    dry_run BOOLEAN NOT NULL DEFAULT 0,
+    total_negotiations INTEGER NOT NULL DEFAULT 0,
+    replied_count INTEGER NOT NULL DEFAULT 0,
+    skipped_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    finished_at DATETIME
+);
+/* ===================== agent_decisions ===================== */
+CREATE TABLE IF NOT EXISTS agent_decisions (
+    id TEXT PRIMARY KEY,
+    run_id TEXT,
+    negotiation_id INTEGER NOT NULL,
+    chat_id INTEGER,
+    vacancy_id INTEGER,
+    employer_id INTEGER,
+    resume_id TEXT,
+    last_message_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    reason TEXT,
+    reply_text TEXT,
+    model TEXT,
+    raw_response TEXT,
+    reasoning_details TEXT NOT NULL DEFAULT '[]',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (negotiation_id, last_message_id)
+);
 /* ===================== settings ===================== */
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -92,6 +134,9 @@ CREATE TABLE IF NOT EXISTS resumes (
 CREATE INDEX IF NOT EXISTS idx_vac_upd ON vacancies(updated_at);
 CREATE INDEX IF NOT EXISTS idx_emp_upd ON employers(updated_at);
 CREATE INDEX IF NOT EXISTS idx_neg_upd ON negotiations(updated_at);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_neg ON chat_messages(negotiation_id);
+CREATE INDEX IF NOT EXISTS idx_agent_decisions_neg_msg ON agent_decisions(negotiation_id, last_message_id);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_created ON agent_runs(created_at);
 /* ===================== ТРИГГЕРЫ (Всегда обновляют дату) ===================== */
 -- Убрал условие WHEN. Теперь при любом UPDATE дата актуализируется принудительно.
 CREATE TRIGGER IF NOT EXISTS trg_resumes_updated

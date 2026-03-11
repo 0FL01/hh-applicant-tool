@@ -255,6 +255,83 @@ services:
 
   # Общий шаблон для новых профилей
   уникальное_имя_сервиса:
+
+---
+
+## Запуск LLM-агента через Docker
+
+Для запуска LLM-агента используется отдельный Dockerfile и docker-compose, которые не требуют установки Chromium и других тяжеловесных зависимостей.
+
+### Сборка образа
+
+```sh
+docker compose -f docker-compose.llm-agent.yml build
+```
+
+### Настройка
+
+Скопируйте пример конфига и настройте его:
+
+```sh
+cp .env.example .env
+```
+
+В `.env` обязательно укажите:
+
+```sh
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+```
+
+### Запуск агента в режиме dry-run
+
+Для безопасного тестирования без реальной отправки сообщений:
+
+```sh
+docker compose -f docker-compose.llm-agent.yml run --rm llm_agent chat-agent --dry-run --limit 5
+```
+
+### Запуск одноразового агента (one-shot)
+
+Для одноразового запуска агента с ограничением по количеству чатов:
+
+```sh
+docker compose -f docker-compose.llm-agent.yml --profile oneshot run --rm llm_agent_run
+```
+
+### Демонный запуск (background)
+
+Для постоянного запуска агента в фоне:
+
+```sh
+docker compose -f docker-compose.llm-agent.yml up -d llm_agent
+```
+
+Просмотр логов:
+
+```sh
+docker compose -f docker-compose.llm-agent.yml logs -f llm_agent
+```
+
+Остановка:
+
+```sh
+docker compose -f docker-compose.llm-agent.yml down
+```
+
+### Пересборка образа после изменений
+
+```sh
+docker compose -f docker-compose.llm-agent.yml up -d --build llm_agent
+```
+
+### Особенности
+
+- Контейнер работает от пользователя `llmagent` (UID/GID 1000 по умолчанию)
+- Конфиги и база данных хранятся в `config/` как и при локальном запуске
+- По умолчанию включен `dry-run` режим для безопасности
+- Модель по умолчанию: `google/gemini-3.1-flash-lite-preview`
+
+---
     extends: hh_applicant_tool
     # может совпадать с именем сервиса
     container_name: уникальное_имя_контейнера
@@ -517,6 +594,9 @@ $ hh-applicant-tool update-resumes
 # Ответить работодателям
 $ hh-applicant-tool reply-employers
 
+# Запустить LLM-агента для автоответов в чатах
+$ hh-applicant-tool chat-agent --dry-run
+
 # Просмотр лога в реальном времени
 $ hh-applicant-tool log -f
 
@@ -594,6 +674,7 @@ $ hh-applicant-tool settings auth.username 'user@example.com'
 | **clone-resume**                   | Клонировать резюме                                                                                                                                                                                                         |
 | **apply-vacancies**, **apply**     | Откликнуться на подходящие вакансии. Если указана строка для поиска (`--search`), то поиск будет произведен по вакансиям, иначе по списку рекомендованных вакансий. Лимит = 200 в день. На HH есть спам-фильтры, так что лучше не рассылайте отклики со ссылками, иначе рискуете попасть в теневой бан. |
 | **reply-employers**, **reply**     | Ответить во все чаты с работодателями, где нет ответа либо не прочитали ваш предыдущий ответ                                                                                                                               |
+| **chat-agent**, **ai-agent**       | LLM-агент для автоматического ответа в чатах работодателей через OpenRouter                                                                                                                                               |
 | **clear-negotiations**             | Отмена откликов                                                                                                                                                                                                            |
 | **call-api**, **api**              | Вызов произвольного метода API с выводом результата.                                                                                                                                                                       |
 | **refresh-token**, **refresh**     | Обновляет access_token.                                                                                                                                                                                                    |
@@ -668,6 +749,8 @@ npx @redocly/cli preview -d docs/hhapi
 
 Для генерации опроводительных писем при откликах и ответа в чаты работодателей (`reply-employers`) можно использовать OpenAI (ChatGPT).
 
+Для отдельного MVP-агента автоответов по чатам используйте `chat-agent`. Он вынесен в отдельный модуль в корне репозитория (`hh_llm_agent/`) и работает через OpenRouter.
+
 Пример рассылки откликов с генерированным письмом:
 
 ```sh
@@ -702,6 +785,47 @@ hh-applicant-tool config -e
   }
 }
 ```
+
+---
+
+### OpenRouter Chat Agent
+
+Отредактируйте конфиг:
+
+```sh
+hh-applicant-tool config -e
+```
+
+Добавьте настройки OpenRouter и агента:
+
+```json
+{
+  "openrouter": {
+    "api_key": "ВАШ_OPENROUTER_API_KEY",
+    "model": "google/gemini-3.1-flash-lite-preview",
+    "base_url": "https://openrouter.ai/api/v1",
+    "temperature": 0.2,
+    "max_completion_tokens": 1200,
+    "reasoning_enabled": true
+  },
+  "chat_agent": {
+    "max_history_messages": 12,
+    "period_days": 14,
+    "system_prompt": "Ты соискатель на HeadHunter. Отвечай работодателю по-русски, вежливо и кратко.",
+    "reply_instruction": "Верни JSON с полями action, reply_text, reason."
+  }
+}
+```
+
+Примеры запуска:
+
+```sh
+hh-applicant-tool chat-agent --dry-run
+hh-applicant-tool chat-agent --limit 5
+hh-applicant-tool chat-agent --resume-id abc123 --period 7
+```
+
+Агент сохраняет историю сообщений, решения модели и статистику запусков в SQLite.
 
 ---
 
