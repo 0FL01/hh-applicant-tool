@@ -85,7 +85,6 @@ The default branch is `main`.
 - `config.json` keys:
   - `openrouter.api_key` (обязателен)
   - `openrouter.model` (дефолт: `google/gemini-3.1-flash-lite-preview`)
-  - `openrouter.base_url` (дефолт: `https://openrouter.ai/api/v1`)
   - `openrouter.temperature` (дефолт: 0.2)
   - `openrouter.max_completion_tokens` (дефолт: 1200)
   - `openrouter.reasoning_enabled` (дефолт: true)
