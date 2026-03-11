@@ -86,6 +86,7 @@ class Operation(BaseOperation):
     """Откликнуться на все подходящие вакансии."""
 
     __aliases__ = ("apply", "apply-similar")
+    excluded_keywords_env_name = "HH_APPLY_EXCLUDED_KEYWORDS"
 
     def setup_parser(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--resume-id", help="Идентефикатор резюме")
@@ -289,6 +290,49 @@ class Operation(BaseOperation):
         )
         return None
 
+    @staticmethod
+    def _parse_excluded_keywords(value: str | None) -> list[str]:
+        if not value:
+            return []
+
+        keywords = [
+            item.strip() for item in re.split(r"[,;\n]+", value) if item.strip()
+        ]
+        return list(dict.fromkeys(keywords))
+
+    @staticmethod
+    def _build_keywords_regex(keywords: list[str]) -> str | None:
+        if not keywords:
+            return None
+
+        escaped = [
+            re.escape(keyword).replace(r"\ ", r"\s+") for keyword in keywords
+        ]
+        return "|".join(escaped)
+
+    @classmethod
+    def _merge_excluded_filters(
+        cls,
+        cli_filter: str | None,
+        env_keywords: str | None,
+    ) -> str | None:
+        filters = []
+
+        if cli_filter:
+            filters.append(f"(?:{cli_filter})")
+
+        keywords = cls._parse_excluded_keywords(env_keywords)
+        keywords_filter = cls._build_keywords_regex(keywords)
+        if keywords_filter:
+            filters.append(f"(?:{keywords_filter})")
+            logger.info(
+                "Добавлен фильтр по %d ключевым словам из %s",
+                len(keywords),
+                cls.excluded_keywords_env_name,
+            )
+
+        return "|".join(filters) if filters else None
+
     @property
     def api_client(self):
         return self.tool.api_client
@@ -307,6 +351,7 @@ class Operation(BaseOperation):
             getenv("HH_APPLY_FORCE_MESSAGE")
         )
         env_cover_letter = getenv("HH_APPLY_COVER_LETTER")
+        env_excluded_keywords = getenv(self.excluded_keywords_env_name)
 
         self.cover_letter = (
             args.letter_file.read_text(encoding="utf-8", errors="ignore")
@@ -324,7 +369,10 @@ class Operation(BaseOperation):
         self.employer_id = args.employer_id
         self.employment = args.employment
         self.excluded_employer_id = args.excluded_employer_id
-        self.excluded_filter = args.excluded_filter
+        self.excluded_filter = self._merge_excluded_filters(
+            cli_filter=args.excluded_filter,
+            env_keywords=env_excluded_keywords,
+        )
         self.experience = args.experience
         self.force_message = (
             args.force_message
@@ -990,6 +1038,9 @@ class Operation(BaseOperation):
                 return
 
     def _is_filtered(self, vacancy: SearchVacancy) -> bool:
+        if not self.excluded_filter and not self.max_responses:
+            return False
+
         r = self.tool.session.get("https://hh.ru/vacancy/" + vacancy["id"])
         r.raise_for_status()
         # print(r.text)
@@ -1011,15 +1062,27 @@ class Operation(BaseOperation):
             return False
 
         if self.excluded_filter:
-            description, _ = self.json_decoder.raw_decode(
-                re.search(r'"description": (.*)', r.text).group(1)
-            )
-            description = strip_tags(description)
+            description = ""
+            description_match = re.search(r'"description": (.*)', r.text)
+
+            if description_match:
+                try:
+                    description, _ = self.json_decoder.raw_decode(
+                        description_match.group(1)
+                    )
+                    description = strip_tags(description)
+                except ValueError as ex:
+                    logger.warning(
+                        "Не удалось прочитать описание вакансии %s: %s",
+                        vacancy["alternate_url"],
+                        ex,
+                    )
+
             content = vacancy["name"] + "\n" + description
             logger.debug(content[:2047])
             excluded_pat: re.Pattern = re.compile(
                 self.excluded_filter, re.IGNORECASE
             )
-            return bool(excluded_pat.match(content))
+            return bool(excluded_pat.search(content))
 
         return False
