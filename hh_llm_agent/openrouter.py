@@ -125,8 +125,10 @@ class OpenRouterChatClient:
                     "role": "user",
                     "content": (
                         "Верни тот же ответ строго как JSON-объект без ``` и "
-                        'без пояснений. Формат: {"action": "reply"|"skip", '
-                        '"reply_text": "...", "reason": "..."}.'
+                        "без пояснений. Формат: "
+                        '{"action": "reply"|"skip", "reply_mode": '
+                        '"single"|"qa_series", "reply_text": "...", '
+                        '"reply_messages": ["..."], "reason": "..."}.'
                     ),
                 }
             )

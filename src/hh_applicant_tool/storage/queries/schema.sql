@@ -110,6 +110,22 @@ CREATE TABLE IF NOT EXISTS agent_decisions (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (negotiation_id, last_message_id)
 );
+/* ===================== agent_outbox ===================== */
+CREATE TABLE IF NOT EXISTS agent_outbox (
+    id TEXT PRIMARY KEY,
+    run_id TEXT,
+    negotiation_id INTEGER NOT NULL,
+    chat_id INTEGER,
+    source_last_message_id TEXT NOT NULL,
+    sequence_no INTEGER NOT NULL,
+    message_text TEXT NOT NULL,
+    send_after DATETIME,
+    sent_at DATETIME,
+    status TEXT NOT NULL DEFAULT 'pending',
+    last_error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (negotiation_id, source_last_message_id, sequence_no)
+);
 /* ===================== settings ===================== */
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -136,6 +152,7 @@ CREATE INDEX IF NOT EXISTS idx_emp_upd ON employers(updated_at);
 CREATE INDEX IF NOT EXISTS idx_neg_upd ON negotiations(updated_at);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_neg ON chat_messages(negotiation_id);
 CREATE INDEX IF NOT EXISTS idx_agent_decisions_neg_msg ON agent_decisions(negotiation_id, last_message_id);
+CREATE INDEX IF NOT EXISTS idx_agent_outbox_status_send_after ON agent_outbox(status, send_after);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_created ON agent_runs(created_at);
 /* ===================== ТРИГГЕРЫ (Всегда обновляют дату) ===================== */
 -- Убрал условие WHEN. Теперь при любом UPDATE дата актуализируется принудительно.

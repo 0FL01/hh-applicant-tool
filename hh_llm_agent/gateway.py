@@ -38,8 +38,15 @@ class HHGateway:
                 break
         return messages
 
-    def send_message(self, negotiation_id: str | int, message: str) -> None:
+    def send_message(
+        self,
+        negotiation_id: str | int,
+        message: str,
+        *,
+        delay: float | None = None,
+    ) -> None:
         self.tool.api_client.post(
             f"/negotiations/{negotiation_id}/messages",
             message=message,
+            delay=delay,
         )

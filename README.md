@@ -366,6 +366,10 @@ docker compose -f docker-compose.llm-agent.yml up -d --build llm_agent
 - Конфиги и база данных хранятся в `config/` как и при локальном запуске (через volume mount `.:/app`)
 - По умолчанию контейнер запускает именно daemon-режим агента (`chat-agent --daemon`)
 - Частота опроса задается через `CHAT_AGENT_POLL_INTERVAL` (по умолчанию 60 секунд)
+- Между batch-циклами агент спит случайно в окне `CHAT_AGENT_SLEEP_MIN_MINUTES`-`CHAT_AGENT_SLEEP_MAX_MINUTES` (по умолчанию 20-30 минут)
+- По умолчанию включен ночной quiet window `23:00-08:00` по `Europe/Moscow`; переопределяется через `CHAT_AGENT_QUIET_HOURS*`
+- Подряд идущие сообщения работодателя агент старается склеить в один входящий пакет через `CHAT_AGENT_INCOMING_COLLECT_SECONDS`
+- Для screening-ботов агент умеет планировать Q/A-серию из 2-3 коротких сообщений с jitter между частями
 - Модель по умолчанию: `google/gemini-3.1-flash-lite-preview`
 - При использовании `run --rm` с другими командами (например, `--dry-run`) стандартная daemon-команда переопределяется
 
@@ -795,11 +799,31 @@ hh-applicant-tool config -e
   "chat_agent": {
     "max_history_messages": 12,
     "period_days": 14,
+    "sleep_min_minutes": 20,
+    "sleep_max_minutes": 30,
+    "timezone": "Europe/Moscow",
+    "quiet_hours_enabled": true,
+    "quiet_hours_start": "23:00",
+    "quiet_hours_end": "08:00",
+    "incoming_collect_seconds": 120,
+    "reply_delay_min_seconds": 15,
+    "reply_delay_max_seconds": 60,
+    "qa_series_delay_min_seconds": 30,
+    "qa_series_delay_max_seconds": 120,
     "system_prompt": "Ты соискатель на HeadHunter. Отвечай работодателю по-русски, вежливо и кратко.",
-    "reply_instruction": "Верни JSON с полями action, reply_text, reason."
+    "reply_instruction": "Верни JSON с полями action, reply_mode, reply_text, reply_messages, reason."
   }
 }
 ```
+
+Как работает агент:
+
+- Берет только неотвеченный хвост сообщений работодателя после последнего сообщения кандидата.
+- Перед ответом выдерживает небольшое окно `incoming_collect_seconds`, чтобы склеить подряд идущие реплики вроде `Здравствуйте!` + следующий вопрос.
+- Для screening-ботов и anti-bot опросов может вернуть либо один цельный ответ, либо Q/A-серию из 2-3 коротких сообщений с jitter между частями.
+- В daemon-режиме работает batch-циклами: обработал накопившиеся чаты, затем ушел спать на случайный интервал в окне `sleep_min_minutes`-`sleep_max_minutes`.
+- По умолчанию ночью не отвечает: quiet window `23:00-08:00` по `Europe/Moscow`.
+- Отложенные части Q/A-серий сохраняются в SQLite и досылаются после рестарта процесса.
 
 Примеры запуска:
 
@@ -807,9 +831,10 @@ hh-applicant-tool config -e
 hh-applicant-tool chat-agent --dry-run
 hh-applicant-tool chat-agent --limit 5
 hh-applicant-tool chat-agent --resume-id abc123 --period 7
+hh-applicant-tool chat-agent --daemon --sleep-min-minutes 25 --sleep-max-minutes 35
 ```
 
-Агент сохраняет историю сообщений, решения модели и статистику запусков в SQLite.
+Агент сохраняет историю сообщений, решения модели, outbox отложенных Q/A-серий и статистику запусков в SQLite.
 
 ---
 

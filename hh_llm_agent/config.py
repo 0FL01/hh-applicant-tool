@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from os import getenv
 from typing import Any
 
+from .timing import AgentTimingConfig
+
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = "google/gemini-3.1-flash-lite-preview"
 DEFAULT_SYSTEM_PROMPT = (
@@ -13,10 +15,13 @@ DEFAULT_SYSTEM_PROMPT = (
     "эмодзи и канцелярит."
 )
 DEFAULT_REPLY_INSTRUCTION = (
-    "Проанализируй переписку и верни JSON с полями action, reply_text, reason. "
-    "action может быть только reply или skip. Если нужен ответ работодателю, "
-    "выбери reply и напиши короткий профессиональный текст в reply_text. Если "
-    "отвечать не нужно, выбери skip и кратко объясни why в reason."
+    "Проанализируй переписку и верни JSON с полями action, reply_mode, "
+    "reply_text, reply_messages, reason. action может быть только reply или "
+    "skip. reply_mode может быть single или qa_series. Если нужен один цельный "
+    "ответ работодателю, выбери single и заполни reply_text. Если во входящем "
+    "пакете несколько screening-вопросов и естественнее ответить короткой "
+    "серией, выбери qa_series и верни 2-3 коротких сообщения в reply_messages. "
+    "Если отвечать не нужно, выбери skip и кратко объясни why в reason."
 )
 
 
@@ -45,6 +50,7 @@ class AgentConfig:
     resume_id: str | None = None
     skip_blacklisted: bool = True
     force: bool = False
+    timing: AgentTimingConfig = AgentTimingConfig()
 
 
 def _parse_env_bool(name: str) -> bool | None:
@@ -68,6 +74,23 @@ def _get_nested(data: dict[str, Any], path: str, default: Any = None) -> Any:
         if current is None:
             return default
     return current
+
+
+def _env_or_value(
+    env_name: str,
+    arg_value: Any,
+    config_value: Any,
+    default: Any,
+    caster,
+):
+    env_value = getenv(env_name)
+    if env_value is not None:
+        return caster(env_value)
+    if arg_value is not None:
+        return caster(arg_value)
+    if config_value is not None:
+        return caster(config_value)
+    return default
 
 
 def load_agent_config(tool: Any, args: Any) -> AgentConfig:
@@ -177,6 +200,95 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         ),
     )
 
+    quiet_hours_enabled = _parse_env_bool("CHAT_AGENT_QUIET_HOURS")
+    if quiet_hours_enabled is None:
+        quiet_hours_enabled = (
+            getattr(args, "quiet_hours", None)
+            if getattr(args, "quiet_hours", None) is not None
+            else agent_cfg.get("quiet_hours_enabled", True)
+        )
+
+    timing = AgentTimingConfig(
+        sleep_min_minutes=_env_or_value(
+            "CHAT_AGENT_SLEEP_MIN_MINUTES",
+            getattr(args, "sleep_min_minutes", None),
+            agent_cfg.get("sleep_min_minutes"),
+            20,
+            int,
+        ),
+        sleep_max_minutes=_env_or_value(
+            "CHAT_AGENT_SLEEP_MAX_MINUTES",
+            getattr(args, "sleep_max_minutes", None),
+            agent_cfg.get("sleep_max_minutes"),
+            30,
+            int,
+        ),
+        timezone=_env_or_value(
+            "CHAT_AGENT_TIMEZONE",
+            getattr(args, "timezone", None),
+            agent_cfg.get("timezone"),
+            "Europe/Moscow",
+            str,
+        ),
+        quiet_hours_enabled=bool(quiet_hours_enabled),
+        quiet_hours_start=_env_or_value(
+            "CHAT_AGENT_QUIET_HOURS_START",
+            getattr(args, "quiet_hours_start", None),
+            agent_cfg.get("quiet_hours_start"),
+            "23:00",
+            str,
+        ),
+        quiet_hours_end=_env_or_value(
+            "CHAT_AGENT_QUIET_HOURS_END",
+            getattr(args, "quiet_hours_end", None),
+            agent_cfg.get("quiet_hours_end"),
+            "08:00",
+            str,
+        ),
+        wake_jitter_seconds=_env_or_value(
+            "CHAT_AGENT_WAKE_JITTER_SECONDS",
+            getattr(args, "wake_jitter_seconds", None),
+            agent_cfg.get("wake_jitter_seconds"),
+            300,
+            int,
+        ),
+        incoming_collect_seconds=_env_or_value(
+            "CHAT_AGENT_INCOMING_COLLECT_SECONDS",
+            getattr(args, "incoming_collect_seconds", None),
+            agent_cfg.get("incoming_collect_seconds"),
+            120,
+            int,
+        ),
+        reply_delay_min_seconds=_env_or_value(
+            "CHAT_AGENT_REPLY_DELAY_MIN_SECONDS",
+            getattr(args, "reply_delay_min_seconds", None),
+            agent_cfg.get("reply_delay_min_seconds"),
+            15,
+            int,
+        ),
+        reply_delay_max_seconds=_env_or_value(
+            "CHAT_AGENT_REPLY_DELAY_MAX_SECONDS",
+            getattr(args, "reply_delay_max_seconds", None),
+            agent_cfg.get("reply_delay_max_seconds"),
+            60,
+            int,
+        ),
+        qa_series_delay_min_seconds=_env_or_value(
+            "CHAT_AGENT_QA_SERIES_DELAY_MIN_SECONDS",
+            getattr(args, "qa_series_delay_min_seconds", None),
+            agent_cfg.get("qa_series_delay_min_seconds"),
+            30,
+            int,
+        ),
+        qa_series_delay_max_seconds=_env_or_value(
+            "CHAT_AGENT_QA_SERIES_DELAY_MAX_SECONDS",
+            getattr(args, "qa_series_delay_max_seconds", None),
+            agent_cfg.get("qa_series_delay_max_seconds"),
+            120,
+            int,
+        ),
+    )
+
     return AgentConfig(
         openrouter=openrouter,
         system_prompt=system_prompt,
@@ -198,4 +310,5 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         if getattr(args, "skip_blacklisted", None) is not None
         else agent_cfg.get("skip_blacklisted", True),
         force=getattr(args, "force", False),
+        timing=timing,
     )

@@ -40,8 +40,9 @@ The default branch is `main`.
 - **ApiClient/OAuthClient (`api/client.py`)**: обертка над `requests` c rate-delay, авторизационными заголовками и авто-refresh access token.
 - **StorageFacade (`storage/facade.py`)**: единая точка доступа к persistence-слою SQLite, включая репозитории агента.
 - **Chat Agent Operation (`src/hh_applicant_tool/operations/chat_agent.py`)**: CLI-адаптер для `hh_llm_agent`, поддерживает one-shot и daemon-loop режимы.
-- **ChatAgentService (`hh_llm_agent/service.py`)**: основной workflow автоответов: отбор переговоров, чтение сообщений, вызов LLM, дедупликация, отправка ответа, audit в SQLite.
+- **ChatAgentService (`hh_llm_agent/service.py`)**: основной workflow автоответов: batch-run, quiet hours, debounce свежих сообщений работодателя, single-reply/QA-series планирование, outbox и audit в SQLite.
 - **OpenRouterChatClient (`hh_llm_agent/openrouter.py`)**: клиент OpenRouter через SDK `openai` с reasoning и JSON repair.
+- **TimingPolicy (`hh_llm_agent/timing.py`)**: политика сна агента, quiet hours по таймзоне, jitter между циклами и сообщениями.
 
 ## Architecture & Rules
 
@@ -52,23 +53,28 @@ The default branch is `main`.
 - Persistence via repositories: доступ к БД через `StorageFacade`/репозитории, а не raw SQL по всему коду (исключая команду `query`).
 - Hybrid integration: часть действий выполняется через API, часть через web-сессию/cookies (например, XSRF и browser-auth сценарии).
 - Idempotent chat processing: агент не должен отвечать повторно на одно и то же последнее сообщение, если нет явного `--force`.
+- Durable reply delivery: если агент планирует серию ответов, они должны жить в outbox и переживать рестарты/quiet hours без дублей.
 
 ### 2. LLM Agent Workflow
 - Источник чатов: агент читает переговоры через `tool.get_negotiations()` и историю сообщений через `/negotiations/{nid}/messages`.
+- Batch schedule: в daemon-режиме агент работает проходами, затем спит случайный интервал `sleep_min_minutes..sleep_max_minutes`; ночью по умолчанию не отвечает (`23:00-08:00`, `Europe/Moscow`).
 - Фильтрация: агент пропускает неподходящие переговоры по `resume_id`, `period_days`, blacklist, `only_invitations`, состоянию `discard` и отсутствию текстовых сообщений.
-- Триггер ответа: агент отвечает только если последнее текстовое сообщение пришло от работодателя.
+- Триггер ответа: агент отвечает только на неотвеченный хвост сообщений работодателя после последнего сообщения кандидата.
+- Debounce: если последнее сообщение работодателя слишком свежее, агент выдерживает `incoming_collect_seconds`, перечитывает чат и пытается склеить подряд идущие реплики в один пакет.
 - Дедупликация: если `(negotiation_id, last_message_id)` уже есть в `agent_decisions`, чат пропускается, если не передан `--force`.
-- Подготовка prompt: в модель передаются системный prompt, контекст по кандидату/резюме/вакансии/работодателю, последние сообщения и инструкция вернуть JSON `action/reply_text/reason`.
+- Подготовка prompt: в модель передаются системный prompt, контекст по кандидату/резюме/вакансии/работодателю, последние сообщения, неотвеченный employer-tail и инструкция вернуть JSON `action/reply_mode/reply_text/reply_messages/reason`.
 - LLM decision: OpenRouter вызывается с reasoning; если модель вернула невалидный JSON, выполняется repair-запрос с сохранением `reasoning_details`.
 - Выполнение решения:
   - `skip` -> сохраняется решение в `agent_decisions`
   - `reply` + `dry_run` -> печатается предполагаемый ответ без отправки
-  - `reply` -> сообщение отправляется через API `/negotiations/{nid}/messages`
+  - `reply(single)` -> один ответ отправляется через API `/negotiations/{nid}/messages`
+  - `reply(qa_series)` -> 2-3 коротких сообщения кладутся в `agent_outbox` и отправляются с jitter между частями
 - Audit/persistence:
   - `negotiations` - sync переговоров
   - `chat_messages` - локальный кеш сообщений
   - `agent_runs` - статистика запуска агента
   - `agent_decisions` - решения модели, причины skip, reply text, raw_response, reasoning_details
+  - `agent_outbox` - отложенные части Q/A-серий, их статус, время отправки и ошибки
 
 ### 3. Conventions
 - **CLI aliases**: для пользовательских команд часто задаются короткие алиасы (`auth`, `apply`, `ls` и т.п.).
@@ -77,6 +83,7 @@ The default branch is `main`.
 - **Typing/linting**: pyright включен в режиме `off`; основной линтинг через `ruff` и `pylint`.
 - **Tests**: использовать `pytest` (основной smoke check перед изменениями в логике).
 - **OpenRouter defaults**: базовая модель по умолчанию - `google/gemini-3.1-flash-lite-preview`, reasoning включен по умолчанию, max_completion_tokens=1200, max_history_messages=12, temperature=0.2.
+- **Chat timing defaults**: quiet hours включены по умолчанию (`23:00-08:00`, `Europe/Moscow`), debounce новых employer-сообщений 120 секунд, batch-sleep 20-30 минут.
 
 ## Runtime Notes for Agents
 
@@ -98,12 +105,24 @@ The default branch is `main`.
   - `chat_agent.resume_id` (дефолт: None - все резюме)
   - `chat_agent.skip_blacklisted` (дефолт: true)
   - `chat_agent.force` (дефолт: false)
+  - `chat_agent.sleep_min_minutes` / `chat_agent.sleep_max_minutes` (дефолт: 20/30)
+  - `chat_agent.timezone` (дефолт: `Europe/Moscow`)
+  - `chat_agent.quiet_hours_enabled` / `quiet_hours_start` / `quiet_hours_end`
+  - `chat_agent.incoming_collect_seconds` (дефолт: 120)
+  - `chat_agent.reply_delay_min_seconds` / `reply_delay_max_seconds`
+  - `chat_agent.qa_series_delay_min_seconds` / `qa_series_delay_max_seconds`
 - Environment variables from `.env.example`:
   - `OPENROUTER_API_KEY` (обязателен)
   - `OPENROUTER_MODEL`
   - `CHAT_AGENT_TEMPERATURE`
   - `CHAT_AGENT_DRY_RUN` (альтернатива: `HH_AGENT_DRY_RUN`)
   - `CHAT_AGENT_POLL_INTERVAL` (дефолт: 60 секунд)
+  - `CHAT_AGENT_SLEEP_MIN_MINUTES`, `CHAT_AGENT_SLEEP_MAX_MINUTES`
+  - `CHAT_AGENT_TIMEZONE`
+  - `CHAT_AGENT_QUIET_HOURS`, `CHAT_AGENT_QUIET_HOURS_START`, `CHAT_AGENT_QUIET_HOURS_END`, `CHAT_AGENT_WAKE_JITTER_SECONDS`
+  - `CHAT_AGENT_INCOMING_COLLECT_SECONDS`
+  - `CHAT_AGENT_REPLY_DELAY_MIN_SECONDS`, `CHAT_AGENT_REPLY_DELAY_MAX_SECONDS`
+  - `CHAT_AGENT_QA_SERIES_DELAY_MIN_SECONDS`, `CHAT_AGENT_QA_SERIES_DELAY_MAX_SECONDS`
   - `CHAT_AGENT_MAX_COMPLETION_TOKENS` (дефолт: 1200)
   - `CHAT_AGENT_MAX_HISTORY_MESSAGES` (дефолт: 12)
   - `CHAT_AGENT_PERIOD_DAYS`
@@ -121,7 +140,7 @@ The default branch is `main`.
 2. Перед добавлением новой команды проверь, нет ли близкой реализации в `src/hh_applicant_tool/operations/`.
 3. Если меняешь LLM-агент, смотри и CLI-адаптер `src/hh_applicant_tool/operations/chat_agent.py`, и root-level модуль `hh_llm_agent/`.
 4. Для изменений БД синхронизируй `storage/models`, `storage/repositories` и SQL-схему в `storage/queries/schema.sql`.
-5. Если меняешь audit/state логику агента, проверь согласованность таблиц `chat_messages`, `agent_runs`, `agent_decisions`.
+5. Если меняешь audit/state логику агента, проверь согласованность таблиц `chat_messages`, `agent_runs`, `agent_decisions`, `agent_outbox`.
 6. Не коммить секреты и runtime-артефакты из `config/`, `.env`, токены, cookies и локальные DB/log файлы.
 7. Для проверки изменений запускай минимум `pytest`, а для CLI-поведения - целевую команду через `python -m hh_applicant_tool ...`.
 8. Для OpenRouter-логики отдельно полезно гонять `tests/test_openrouter_client.py`.

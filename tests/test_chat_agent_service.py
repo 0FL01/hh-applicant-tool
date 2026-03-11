@@ -1,10 +1,12 @@
 import sqlite3
+from datetime import datetime
 from types import SimpleNamespace
 
 from hh_applicant_tool.storage import StorageFacade
 from hh_llm_agent.config import AgentConfig, OpenRouterConfig
 from hh_llm_agent.openrouter import LLMReply
 from hh_llm_agent.service import ChatAgentService
+from hh_llm_agent.timing import AgentTimingConfig, TimingPolicy
 
 
 NEGOTIATION = {
@@ -25,6 +27,7 @@ EMPLOYER_MESSAGE = {
     "id": "msg-1",
     "text": "Добрый день! Расскажите подробнее о вашем опыте.",
     "author": {"participant_type": "employer"},
+    "created_at": "2026-03-11T10:00:00+03:00",
 }
 
 RESUME = {
@@ -37,8 +40,10 @@ ME = {"first_name": "Ivan", "last_name": "Petrov"}
 
 
 class FakeGateway:
-    def __init__(self):
+    def __init__(self, responses=None):
         self.sent_messages = []
+        self.responses = responses or [[EMPLOYER_MESSAGE]]
+        self.fetch_calls = 0
 
     def get_user(self):
         return ME
@@ -54,14 +59,25 @@ class FakeGateway:
 
     def fetch_messages(self, negotiation_id):
         assert negotiation_id == NEGOTIATION["id"]
-        return [EMPLOYER_MESSAGE]
+        index = min(self.fetch_calls, len(self.responses) - 1)
+        self.fetch_calls += 1
+        return self.responses[index]
 
-    def send_message(self, negotiation_id, message):
-        self.sent_messages.append((negotiation_id, message))
+    def send_message(self, negotiation_id, message, delay=None):
+        self.sent_messages.append((negotiation_id, message, delay))
 
 
 class FakeLLMClient:
     instances = []
+    reply = LLMReply(
+        content='{"action":"reply","reply_mode":"single","reply_text":"Здравствуйте!","reason":"need_reply"}',
+        parsed={
+            "action": "reply",
+            "reply_mode": "single",
+            "reply_text": "Здравствуйте!",
+            "reason": "need_reply",
+        },
+    )
 
     def __init__(self, config):
         self.config = config
@@ -70,42 +86,67 @@ class FakeLLMClient:
 
     def complete_json(self, messages):
         self.calls.append(messages)
-        return LLMReply(
-            content='{"action":"reply","reply_text":"Здравствуйте!","reason":"need_reply"}',
-            parsed={
-                "action": "reply",
-                "reply_text": "Здравствуйте!",
-                "reason": "need_reply",
-            },
-        )
+        return self.__class__.reply
 
 
 def make_tool():
     return SimpleNamespace(storage=StorageFacade(sqlite3.connect(":memory:")))
 
 
-def make_config(*, dry_run):
+def make_config(*, dry_run, incoming_collect_seconds=0):
     return AgentConfig(
         openrouter=OpenRouterConfig(api_key="token"),
         dry_run=dry_run,
+        timing=AgentTimingConfig(
+            sleep_min_minutes=20,
+            sleep_max_minutes=30,
+            quiet_hours_enabled=False,
+            incoming_collect_seconds=incoming_collect_seconds,
+            reply_delay_min_seconds=0,
+            reply_delay_max_seconds=0,
+            qa_series_delay_min_seconds=0,
+            qa_series_delay_max_seconds=0,
+            wake_jitter_seconds=0,
+        ),
     )
 
 
-def make_service(monkeypatch, tool, gateway, *, dry_run):
+def make_service(
+    monkeypatch,
+    tool,
+    gateway,
+    *,
+    dry_run,
+    incoming_collect_seconds=0,
+):
     monkeypatch.setattr(
         "hh_llm_agent.service.load_agent_config",
-        lambda tool, args: make_config(dry_run=dry_run),
+        lambda tool, args: make_config(
+            dry_run=dry_run,
+            incoming_collect_seconds=incoming_collect_seconds,
+        ),
     )
     monkeypatch.setattr("hh_llm_agent.service.HHGateway", lambda tool: gateway)
     monkeypatch.setattr(
         "hh_llm_agent.service.OpenRouterChatClient",
         FakeLLMClient,
     )
-    return ChatAgentService(tool, SimpleNamespace())
+    service = ChatAgentService(tool, SimpleNamespace())
+    service.sleep_fn = lambda seconds: None
+    return service
 
 
 def test_dry_run_does_not_persist_decisions_and_can_repeat(monkeypatch):
     FakeLLMClient.instances = []
+    FakeLLMClient.reply = LLMReply(
+        content='{"action":"reply","reply_mode":"single","reply_text":"Здравствуйте!","reason":"need_reply"}',
+        parsed={
+            "action": "reply",
+            "reply_mode": "single",
+            "reply_text": "Здравствуйте!",
+            "reason": "need_reply",
+        },
+    )
     tool = make_tool()
 
     first_service = make_service(monkeypatch, tool, FakeGateway(), dry_run=True)
@@ -197,3 +238,81 @@ def test_real_decision_still_blocks_reprocessing(monkeypatch):
     assert stats.skipped == 1
     assert len(FakeLLMClient.instances) == 1
     assert len(FakeLLMClient.instances[0].calls) == 0
+
+
+def test_qa_series_is_queued_and_sent_in_order(monkeypatch):
+    FakeLLMClient.instances = []
+    FakeLLMClient.reply = LLMReply(
+        content='{"action":"reply","reply_mode":"qa_series","reply_messages":["msg1","msg2"],"reason":"screening"}',
+        parsed={
+            "action": "reply",
+            "reply_mode": "qa_series",
+            "reply_messages": ["msg1", "msg2"],
+            "reason": "screening",
+        },
+    )
+    tool = make_tool()
+    gateway = FakeGateway()
+
+    service = make_service(monkeypatch, tool, gateway, dry_run=False)
+    stats = service.run()
+
+    assert stats.replied == 1
+    assert [item[1] for item in gateway.sent_messages] == ["msg1", "msg2"]
+    decisions = list(tool.storage.agent_decisions.find())
+    assert len(decisions) == 1
+    assert decisions[0].reply_text == "msg1\n\nmsg2"
+    outbox_items = list(tool.storage.agent_outbox.find())
+    assert len(outbox_items) == 2
+    assert all(item.status == "sent" for item in outbox_items)
+
+
+def test_recent_messages_are_collected_before_llm_call(monkeypatch):
+    FakeLLMClient.instances = []
+    FakeLLMClient.reply = LLMReply(
+        content='{"action":"reply","reply_mode":"single","reply_text":"combined","reason":"need_reply"}',
+        parsed={
+            "action": "reply",
+            "reply_mode": "single",
+            "reply_text": "combined",
+            "reason": "need_reply",
+        },
+    )
+    tool = make_tool()
+    first_message = {
+        **EMPLOYER_MESSAGE,
+        "created_at": "2026-03-11T10:01:40+03:00",
+    }
+    second_message = {
+        "id": "msg-2",
+        "text": "Какие у вас ожидания по зарплате?",
+        "author": {"participant_type": "employer"},
+        "created_at": "2026-03-11T10:01:50+03:00",
+    }
+    gateway = FakeGateway(
+        responses=[[first_message], [first_message, second_message]]
+    )
+    service = make_service(
+        monkeypatch,
+        tool,
+        gateway,
+        dry_run=True,
+        incoming_collect_seconds=120,
+    )
+    slept = []
+    service.sleep_fn = slept.append
+    fixed_now = datetime.fromisoformat("2026-03-11T10:02:00+03:00")
+    service.timing = TimingPolicy(
+        service.config.timing,
+        now_fn=lambda tz: fixed_now.astimezone(tz),
+        uniform_fn=lambda a, b: a,
+    )
+
+    stats = service.run()
+
+    assert stats.replied == 1
+    assert gateway.fetch_calls == 2
+    assert slept == [100.0]
+    final_prompt = FakeLLMClient.instances[0].calls[0][-1]["content"]
+    assert "Добрый день!" in final_prompt
+    assert "Какие у вас ожидания по зарплате?" in final_prompt

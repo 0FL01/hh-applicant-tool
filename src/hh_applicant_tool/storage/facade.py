@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 from .repositories.agent_decisions import AgentDecisionRepository
+from .repositories.agent_outbox import AgentOutboxRepository
 from .repositories.agent_runs import AgentRunRepository
 from .repositories.chat_messages import ChatMessageRepository
 from .repositories.contacts import VacancyContactsRepository
@@ -21,6 +22,7 @@ class StorageFacade:
     def __init__(self, conn: sqlite3.Connection):
         init_db(conn)
         self.agent_decisions = AgentDecisionRepository(conn)
+        self.agent_outbox = AgentOutboxRepository(conn)
         self.agent_runs = AgentRunRepository(conn)
         self.chat_messages = ChatMessageRepository(conn)
         self.employer_sites = EmployerSitesRepository(conn)

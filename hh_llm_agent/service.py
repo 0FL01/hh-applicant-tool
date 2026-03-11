@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from hh_applicant_tool.api.errors import ApiError
-from hh_applicant_tool.utils.date import parse_api_datetime
+from hh_applicant_tool.utils.date import parse_api_datetime, try_parse_datetime
 
 from .config import AgentConfig, load_agent_config
 from .gateway import HHGateway
 from .openrouter import LLMReply, OpenRouterChatClient, OpenRouterError
+from .timing import TimingPolicy
 
 logger = logging.getLogger(__package__)
 
@@ -32,10 +34,13 @@ class ChatAgentService:
         self.llm = OpenRouterChatClient(self.config.openrouter)
         self.stats = RunStats()
         self.run_id = uuid4().hex
+        self.timing = TimingPolicy(self.config.timing)
+        self.sleep_fn = time.sleep
 
     def run(self) -> RunStats:
         self._save_run(status="running")
         try:
+            self._flush_pending_outbox()
             me = self.gateway.get_user()
             resumes = self._get_resume_map()
             blacklisted = (
@@ -124,9 +129,9 @@ class ChatAgentService:
             return
 
         messages = [
-            m
-            for m in self.gateway.fetch_messages(negotiation["id"])
-            if m.get("text")
+            message
+            for message in self.gateway.fetch_messages(negotiation["id"])
+            if message.get("text")
         ]
         if not messages:
             self._skip(negotiation, reason="no_messages")
@@ -134,14 +139,26 @@ class ChatAgentService:
 
         self._save_messages(negotiation, messages)
 
-        last_message = messages[-1]
-        if last_message["author"]["participant_type"] != "employer":
+        employer_tail = self._extract_employer_tail(messages)
+        if not employer_tail:
             self._skip(
                 negotiation,
                 reason="last_message_not_from_employer",
-                last_message=last_message,
+                last_message=messages[-1],
             )
             return
+
+        messages, employer_tail = self._collect_recent_employer_messages(
+            negotiation,
+            messages,
+            employer_tail,
+        )
+        last_message = employer_tail[-1]
+
+        self.tool.storage.agent_outbox.cancel_pending_for_negotiation(
+            int(negotiation["id"]),
+            str(last_message["id"]),
+        )
 
         if not self.config.force and self._decision_exists(
             negotiation_id=negotiation["id"],
@@ -151,6 +168,7 @@ class ChatAgentService:
                 negotiation,
                 reason="already_processed",
                 last_message=last_message,
+                persist=False,
             )
             return
 
@@ -160,20 +178,21 @@ class ChatAgentService:
                 resume=resume,
                 me=me,
                 messages=messages,
+                unanswered_messages=employer_tail,
             )
         )
         decision = self._normalize_decision(reply)
-        self._save_decision(
-            negotiation=negotiation,
-            last_message=last_message,
-            action=decision["action"],
-            reason=decision["reason"],
-            reply_text=decision["reply_text"],
-            raw_response=reply.content,
-            reasoning_details=reply.reasoning_details,
-        )
 
-        if decision["action"] != "reply" or not decision["reply_text"]:
+        if decision["action"] != "reply" or not decision["reply_messages"]:
+            self._save_decision(
+                negotiation=negotiation,
+                last_message=last_message,
+                action=decision["action"],
+                reason=decision["reason"],
+                reply_text=decision["reply_text"],
+                raw_response=reply.content,
+                reasoning_details=reply.reasoning_details,
+            )
             self.stats.skipped += 1
             print(
                 f"⏭️ Пропущен чат {negotiation['id']}: {decision['reason'] or 'model_skip'}"
@@ -183,14 +202,29 @@ class ChatAgentService:
         if self.config.dry_run:
             self.stats.replied += 1
             print(
-                f"🧪 dry-run чат {negotiation['id']}: {decision['reply_text']}"
+                f"🧪 dry-run чат {negotiation['id']}: {self._render_reply_text(decision)}"
             )
             return
 
-        self.gateway.send_message(negotiation["id"], decision["reply_text"])
+        self._save_decision(
+            negotiation=negotiation,
+            last_message=last_message,
+            action=decision["action"],
+            reason=decision["reason"],
+            reply_text=self._render_reply_text(decision),
+            raw_response=reply.content,
+            reasoning_details=reply.reasoning_details,
+        )
+        self._enqueue_reply_messages(
+            negotiation=negotiation,
+            last_message=last_message,
+            decision=decision,
+        )
         self.stats.replied += 1
-        print(
-            f"📨 Ответ отправлен для {negotiation['vacancy']['alternate_url']}"
+        self._dispatch_source_outbox(
+            negotiation=int(negotiation["id"]),
+            source_last_message_id=str(last_message["id"]),
+            vacancy_url=(negotiation.get("vacancy") or {}).get("alternate_url"),
         )
 
     def _build_llm_messages(
@@ -199,10 +233,15 @@ class ChatAgentService:
         resume: dict,
         me: dict,
         messages: list[dict],
+        unanswered_messages: list[dict],
     ) -> list[dict[str, str]]:
         vacancy = negotiation.get("vacancy") or {}
         employer = vacancy.get("employer") or {}
         history = messages[-self.config.max_history_messages :]
+        unanswered_block = "\n".join(
+            f"{idx}. {(message.get('text') or '').strip()}"
+            for idx, message in enumerate(unanswered_messages, 1)
+        )
 
         llm_messages: list[dict[str, str]] = [
             {"role": "system", "content": self.config.system_prompt},
@@ -215,7 +254,8 @@ class ChatAgentService:
                     f"- Вакансия: {vacancy.get('name') or ''}\n"
                     f"- Работодатель: {employer.get('name') or ''}\n"
                     f"- Статус отклика: {negotiation['state']['id']}\n"
-                    f"- Отвечать нужно от лица кандидата."
+                    f"- Отвечать нужно от лица кандидата.\n"
+                    f"- Screening mode: {'yes' if self._is_screening_sequence(unanswered_messages) else 'no'}."
                 ).strip(),
             },
         ]
@@ -234,23 +274,72 @@ class ChatAgentService:
             )
 
         llm_messages.append(
-            {"role": "user", "content": self.config.reply_instruction}
+            {
+                "role": "user",
+                "content": (
+                    f"Неотвеченный пакет сообщений работодателя:\n{unanswered_block}\n\n"
+                    f"{self.config.reply_instruction}\n"
+                    "Правила:\n"
+                    "- Если это screening или anti-bot вопросы, отвечай предметно, без пустых фраз.\n"
+                    "- Если работодатель просит уточнить прошлый ответ, добавляй конкретику, а не повторяй прежнюю формулировку.\n"
+                    "- Если вопрос требует данных от работодателя, корректно уточни их и не выдумывай факты о кандидате.\n"
+                    "- Если во входящем пакете несколько отдельных вопросов, ответь на каждый по порядку.\n"
+                    "- Для qa_series верни 2-3 коротких сообщения без markdown и эмодзи."
+                ),
+            }
         )
         return llm_messages
 
-    def _normalize_decision(self, reply: LLMReply) -> dict[str, str]:
+    def _normalize_decision(self, reply: LLMReply) -> dict[str, object]:
         payload = reply.parsed or {}
         action = str(payload.get("action") or "skip").strip().lower()
         if action not in {"reply", "skip"}:
             action = "skip"
+        reply_mode = str(payload.get("reply_mode") or "single").strip().lower()
         reply_text = str(payload.get("reply_text") or "").strip()
+        reply_messages = [
+            str(item).strip()
+            for item in (payload.get("reply_messages") or [])
+            if str(item).strip()
+        ]
         reason = str(payload.get("reason") or "").strip()
-        if action == "reply" and not reply_text:
+
+        if reply_mode not in {"single", "qa_series"}:
+            reply_mode = "qa_series" if reply_messages else "single"
+
+        if (
+            action == "reply"
+            and reply_mode == "qa_series"
+            and not reply_messages
+        ):
+            if reply_text:
+                reply_mode = "single"
+            else:
+                action = "skip"
+                reason = reason or "empty_reply"
+
+        if action == "reply" and reply_mode == "single" and not reply_text:
+            if reply_messages:
+                reply_text = " ".join(reply_messages)
+            else:
+                action = "skip"
+                reason = reason or "empty_reply"
+
+        if action == "reply" and reply_mode == "single":
+            reply_messages = [reply_text]
+        elif action == "reply" and len(reply_messages) == 1:
+            reply_mode = "single"
+            reply_text = reply_messages[0]
+
+        if action == "reply" and not reply_messages:
             action = "skip"
             reason = reason or "empty_reply"
+
         return {
             "action": action,
+            "reply_mode": reply_mode,
             "reply_text": reply_text,
+            "reply_messages": reply_messages,
             "reason": reason,
         }
 
@@ -303,6 +392,184 @@ class ChatAgentService:
             }
         )
 
+    def _extract_employer_tail(self, messages: list[dict]) -> list[dict]:
+        tail = []
+        for message in reversed(messages):
+            if message["author"]["participant_type"] != "employer":
+                break
+            tail.append(message)
+        return list(reversed(tail))
+
+    def _message_timestamp(
+        self,
+        message: dict,
+        negotiation: dict,
+    ) -> datetime:
+        parsed = try_parse_datetime(message.get("created_at"))
+        if isinstance(parsed, datetime):
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=self.timing.tz)
+            return parsed
+        return parse_api_datetime(negotiation["updated_at"])
+
+    def _collect_recent_employer_messages(
+        self,
+        negotiation: dict,
+        messages: list[dict],
+        employer_tail: list[dict],
+    ) -> tuple[list[dict], list[dict]]:
+        if not employer_tail:
+            return messages, employer_tail
+        delay = self.timing.incoming_collect_delay(
+            self._message_timestamp(employer_tail[-1], negotiation)
+        )
+        if delay <= 0:
+            return messages, employer_tail
+        self._sleep(delay, f"collect employer tail for {negotiation['id']}")
+        refreshed = [
+            message
+            for message in self.gateway.fetch_messages(negotiation["id"])
+            if message.get("text")
+        ]
+        if not refreshed:
+            return messages, employer_tail
+        self._save_messages(negotiation, refreshed)
+        return refreshed, self._extract_employer_tail(refreshed)
+
+    def _is_screening_sequence(self, unanswered_messages: list[dict]) -> bool:
+        combined = "\n".join(
+            (message.get("text") or "").lower()
+            for message in unanswered_messages
+        )
+        markers = (
+            "несколько вопросов",
+            "пару минут",
+            "это займет",
+            "начнем",
+            "подробнее",
+            "какие именно",
+            "уточните",
+        )
+        return len(unanswered_messages) > 1 or any(
+            marker in combined for marker in markers
+        )
+
+    def _render_reply_text(self, decision: dict[str, object]) -> str:
+        return "\n\n".join(
+            str(item).strip()
+            for item in decision.get("reply_messages", [])
+            if str(item).strip()
+        )
+
+    def _enqueue_reply_messages(
+        self,
+        negotiation: dict,
+        last_message: dict,
+        decision: dict[str, object],
+    ) -> None:
+        delays = self.timing.message_schedule_delays(
+            len(decision["reply_messages"])
+        )
+        now = self.timing.now()
+        cumulative_delay = 0.0
+        items = []
+        for index, message_text in enumerate(decision["reply_messages"], 1):
+            cumulative_delay += delays[index - 1]
+            items.append(
+                {
+                    "id": uuid4().hex,
+                    "run_id": self.run_id,
+                    "negotiation_id": negotiation["id"],
+                    "chat_id": negotiation.get("chat_id"),
+                    "source_last_message_id": last_message["id"],
+                    "sequence_no": index,
+                    "message_text": str(message_text),
+                    "send_after": (
+                        now + timedelta(seconds=cumulative_delay)
+                    ).isoformat(),
+                    "status": "pending",
+                }
+            )
+        self.tool.storage.agent_outbox.save_batch(items)
+
+    def _dispatch_source_outbox(
+        self,
+        negotiation: int,
+        source_last_message_id: str,
+        vacancy_url: str | None,
+    ) -> None:
+        pending = self.tool.storage.agent_outbox.list_pending_for_source(
+            negotiation,
+            source_last_message_id,
+        )
+        for item in pending:
+            if self.timing.in_quiet_hours():
+                logger.info(
+                    "Quiet hours reached before sending outbox item %s",
+                    item.id,
+                )
+                return
+            self._wait_until(item.send_after, item.id)
+            if self.timing.in_quiet_hours():
+                logger.info(
+                    "Quiet hours reached while waiting for outbox item %s",
+                    item.id,
+                )
+                return
+            try:
+                self.gateway.send_message(negotiation, item.message_text)
+            except ApiError as ex:
+                self.tool.storage.agent_outbox.mark_failed(item.id, str(ex))
+                raise
+            self.tool.storage.agent_outbox.mark_sent(item.id, self.timing.now())
+            if vacancy_url:
+                print(f"📨 Ответ отправлен для {vacancy_url}")
+            else:
+                print(f"📨 Ответ отправлен для чата {negotiation}")
+
+    def _flush_pending_outbox(self) -> None:
+        for item in self.tool.storage.agent_outbox.list_pending():
+            if self.timing.in_quiet_hours():
+                logger.info("Outbox flush paused by quiet hours")
+                return
+            self._wait_until(item.send_after, item.id)
+            if self.timing.in_quiet_hours():
+                logger.info("Outbox flush stopped by quiet hours")
+                return
+            try:
+                self.gateway.send_message(
+                    item.negotiation_id, item.message_text
+                )
+            except ApiError as ex:
+                self.tool.storage.agent_outbox.mark_failed(item.id, str(ex))
+                raise
+            self.tool.storage.agent_outbox.mark_sent(item.id, self.timing.now())
+
+    def _wait_until(
+        self,
+        send_after: datetime | None,
+        outbox_id: str,
+    ) -> None:
+        if send_after is None:
+            return
+        if not isinstance(send_after, datetime):
+            parsed = try_parse_datetime(send_after)
+            if isinstance(parsed, datetime):
+                send_after = parsed
+            else:
+                return
+        delay = (
+            send_after.astimezone(self.timing.tz) - self.timing.now()
+        ).total_seconds()
+        if delay > 0:
+            self._sleep(delay, f"wait for outbox item {outbox_id}")
+
+    def _sleep(self, seconds: float, reason: str) -> None:
+        if seconds <= 0:
+            return
+        logger.info("Chat agent sleeps %.1f seconds: %s", seconds, reason)
+        self.sleep_fn(seconds)
+
     def _save_decision(
         self,
         negotiation: dict,
@@ -341,10 +608,13 @@ class ChatAgentService:
         negotiation: dict,
         reason: str,
         last_message: dict | None = None,
+        *,
+        persist: bool = True,
     ) -> None:
         self.stats.skipped += 1
         if (
-            last_message
+            persist
+            and last_message
             and self.config.force is False
             and reason != "already_processed"
         ):
