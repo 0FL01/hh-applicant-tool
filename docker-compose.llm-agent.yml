@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    command: ["chat-agent", "--daemon"]
+    command: ["-v", "chat-agent", "--daemon"]
     environment:
       # Директория для конфигов (база данных, tokens, cookies)
       - CONFIG_DIR=/app/config

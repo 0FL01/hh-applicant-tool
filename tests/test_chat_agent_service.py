@@ -1,6 +1,12 @@
 import sqlite3
+import sys
+import types
 from datetime import datetime
 from types import SimpleNamespace
+
+openai_module = types.ModuleType("openai")
+openai_module.OpenAI = object
+sys.modules.setdefault("openai", openai_module)
 
 from hh_applicant_tool.storage import StorageFacade
 from hh_llm_agent.config import AgentConfig, OpenRouterConfig
@@ -316,3 +322,41 @@ def test_recent_messages_are_collected_before_llm_call(monkeypatch):
     final_prompt = FakeLLMClient.instances[0].calls[0][-1]["content"]
     assert "Добрый день!" in final_prompt
     assert "Какие у вас ожидания по зарплате?" in final_prompt
+
+
+def test_run_logs_reply_summary(monkeypatch, caplog):
+    FakeLLMClient.instances = []
+    tool = make_tool()
+    service = make_service(monkeypatch, tool, FakeGateway(), dry_run=True)
+
+    caplog.set_level("INFO", logger="hh_llm_agent")
+
+    stats = service.run()
+
+    assert stats.replied == 1
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Chat agent run started:" in message for message in messages)
+    assert any("Negotiation 1 start:" in message for message in messages)
+    assert any("Negotiation 1 LLM decision:" in message for message in messages)
+    assert any(
+        "Negotiation 1 dry-run reply:" in message for message in messages
+    )
+    assert any("Chat agent run completed:" in message for message in messages)
+
+
+def test_run_logs_skip_summary(monkeypatch, caplog):
+    FakeLLMClient.instances = []
+    tool = make_tool()
+    gateway = FakeGateway(responses=[[]])
+    service = make_service(monkeypatch, tool, gateway, dry_run=True)
+
+    caplog.set_level("INFO", logger="hh_llm_agent")
+
+    stats = service.run()
+
+    assert stats.skipped == 1
+    assert any(
+        "Negotiation 1 skipped: vacancy='Platform Engineer' employer='Acme' reason=no_messages"
+        in record.getMessage()
+        for record in caplog.records
+    )

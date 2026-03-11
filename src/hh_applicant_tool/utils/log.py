@@ -81,8 +81,13 @@ def setup_logger(
     verbosity_level: int,
     log_file: PathLike,
 ) -> None:
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
     # В лог-файл пишем все!
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False
     color_handler = ColorHandler()
     # [C] Critical Error Occurred
     color_handler.setFormatter(

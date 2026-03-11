@@ -34,6 +34,7 @@ DEFAULT_COOKIES_FILENAME = "cookies.txt"
 DEFAULT_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 
 logger = logging.getLogger(__package__)
+agent_logger = logging.getLogger("hh_llm_agent")
 
 
 class BaseOperation:
@@ -360,8 +361,11 @@ class HHApplicantTool:
             logging.DEBUG,
             logging.WARNING - self.args.verbosity * 10,
         )
+        if getattr(self.args, "daemon", False):
+            verbosity_level = min(verbosity_level, logging.INFO)
 
         setup_logger(logger, verbosity_level, self.log_file)
+        setup_logger(agent_logger, verbosity_level, self.log_file)
 
         logger.debug("Путь до профиля: %s", self.config_path)
 

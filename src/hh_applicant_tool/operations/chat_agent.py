@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from datetime import timedelta
 from os import getenv
 from typing import TYPE_CHECKING
 
 from hh_llm_agent.config import load_agent_config
-from hh_llm_agent.service import ChatAgentService
+from hh_llm_agent.service import ChatAgentService, RunStats
 from hh_llm_agent.timing import TimingPolicy
 
 from ..main import BaseNamespace, BaseOperation
@@ -204,10 +205,7 @@ class Operation(BaseOperation):
     def run(self, tool: HHApplicantTool) -> None:
         if tool.args.daemon:
             return self._run_daemon(tool)
-        return self._run_once(tool)
-
-    def _run_once(self, tool: HHApplicantTool) -> None:
-        stats = ChatAgentService(tool, tool.args).run()
+        stats = self._run_once(tool)
         logger.info(
             "Chat agent finished: total=%s replied=%s skipped=%s errors=%s",
             stats.total,
@@ -215,6 +213,10 @@ class Operation(BaseOperation):
             stats.skipped,
             stats.errors,
         )
+        return None
+
+    def _run_once(self, tool: HHApplicantTool) -> RunStats:
+        stats = ChatAgentService(tool, tool.args).run()
         print(
             "🤖 Агент завершил работу:",
             f"обработано={stats.total}",
@@ -222,12 +224,30 @@ class Operation(BaseOperation):
             f"пропусков={stats.skipped}",
             f"ошибок={stats.errors}",
         )
+        return stats
+
+    def _quiet_hours_window(self, config) -> str:
+        if not config.timing.quiet_hours_enabled:
+            return "disabled"
+        return (
+            f"{config.timing.quiet_hours_start}-{config.timing.quiet_hours_end}"
+        )
+
+    def _format_ts(self, value) -> str:
+        return value.strftime("%Y-%m-%d %H:%M:%S %Z")
 
     def _run_daemon(self, tool: HHApplicantTool) -> None:
         config = load_agent_config(tool, tool.args)
         policy = TimingPolicy(config.timing)
+        now = policy.now()
         logger.info(
-            "Starting chat agent daemon with sleep window %s-%s minutes",
+            "Starting chat agent daemon: profile=%s model=%s dry_run=%s timezone=%s quiet_hours=%s now=%s sleep_window=%s-%s minutes",
+            tool.args.profile_id or ".",
+            config.openrouter.model,
+            config.dry_run,
+            config.timing.timezone,
+            self._quiet_hours_window(config),
+            self._format_ts(now),
             config.timing.sleep_min_minutes,
             config.timing.sleep_max_minutes,
         )
@@ -238,9 +258,14 @@ class Operation(BaseOperation):
         cycle = 0
         while True:
             if policy.in_quiet_hours():
+                now = policy.now()
                 sleep_seconds = policy.quiet_sleep_seconds()
+                wake_at = now + timedelta(seconds=sleep_seconds)
                 logger.info(
-                    "Chat agent daemon is in quiet hours, sleeping %.1f seconds",
+                    "Quiet hours active: now=%s window=%s sleeping_until=%s sleep_seconds=%.1f",
+                    self._format_ts(now),
+                    self._quiet_hours_window(config),
+                    self._format_ts(wake_at),
                     sleep_seconds,
                 )
                 time.sleep(sleep_seconds)
@@ -248,13 +273,23 @@ class Operation(BaseOperation):
             cycle += 1
             logger.info("Chat agent daemon cycle %s started", cycle)
             try:
-                self._run_once(tool)
+                stats = self._run_once(tool)
                 tool.save_token()
                 tool.save_cookies()
             except KeyboardInterrupt:
                 raise
             except Exception:
                 logger.exception("Chat agent daemon cycle %s failed", cycle)
+                stats = None
+            if stats is not None:
+                logger.info(
+                    "Chat agent daemon cycle %s summary: total=%s replied=%s skipped=%s errors=%s",
+                    cycle,
+                    stats.total,
+                    stats.replied,
+                    stats.skipped,
+                    stats.errors,
+                )
             logger.info(
                 "Chat agent daemon cycle %s finished, sleeping %.1f seconds",
                 cycle,

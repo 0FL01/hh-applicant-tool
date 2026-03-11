@@ -37,9 +37,62 @@ class ChatAgentService:
         self.timing = TimingPolicy(self.config.timing)
         self.sleep_fn = time.sleep
 
+    def _negotiation_meta(self, negotiation: dict) -> tuple[str, str, str, str]:
+        vacancy = negotiation.get("vacancy") or {}
+        employer = vacancy.get("employer") or {}
+        return (
+            str(negotiation.get("id")),
+            str(vacancy.get("name") or "-"),
+            str(employer.get("name") or "-"),
+            str((negotiation.get("resume") or {}).get("id") or "-"),
+        )
+
+    def _log_negotiation_start(self, negotiation: dict) -> None:
+        negotiation_id, vacancy_name, employer_name, resume_id = (
+            self._negotiation_meta(negotiation)
+        )
+        logger.info(
+            "Negotiation %s start: vacancy=%r employer=%r state=%s resume=%s",
+            negotiation_id,
+            vacancy_name,
+            employer_name,
+            negotiation["state"]["id"],
+            resume_id,
+        )
+
+    def _log_negotiation_outcome(
+        self,
+        negotiation: dict,
+        outcome: str,
+        **details: object,
+    ) -> None:
+        negotiation_id, vacancy_name, employer_name, _ = self._negotiation_meta(
+            negotiation
+        )
+        detail_parts = [f"{key}={value}" for key, value in details.items()]
+        suffix = f" {' '.join(detail_parts)}" if detail_parts else ""
+        logger.info(
+            "Negotiation %s %s: vacancy=%r employer=%r%s",
+            negotiation_id,
+            outcome,
+            vacancy_name,
+            employer_name,
+            suffix,
+        )
+
     def run(self) -> RunStats:
         self._save_run(status="running")
         try:
+            logger.info(
+                "Chat agent run started: run_id=%s dry_run=%s limit=%s resume_id=%s only_invitations=%s skip_blacklisted=%s force=%s",
+                self.run_id,
+                self.config.dry_run,
+                self.config.limit,
+                self.config.resume_id,
+                self.config.only_invitations,
+                self.config.skip_blacklisted,
+                self.config.force,
+            )
             self._flush_pending_outbox()
             me = self.gateway.get_user()
             resumes = self._get_resume_map()
@@ -48,11 +101,19 @@ class ChatAgentService:
                 if self.config.skip_blacklisted
                 else set()
             )
+            logger.info(
+                "Chat agent context loaded: candidate=%r resumes=%s blacklisted=%s",
+                f"{(me.get('first_name') or '').strip()} {(me.get('last_name') or '').strip()}".strip()
+                or "-",
+                len(resumes),
+                len(blacklisted),
+            )
 
             for negotiation in self.gateway.get_negotiations():
                 if self.config.limit and self.stats.total >= self.config.limit:
                     break
                 self.stats.total += 1
+                self._log_negotiation_start(negotiation)
                 try:
                     self._process_negotiation(
                         negotiation=negotiation,
@@ -76,9 +137,25 @@ class ChatAgentService:
                     )
 
             self._save_run(status="completed")
+            logger.info(
+                "Chat agent run completed: run_id=%s total=%s replied=%s skipped=%s errors=%s",
+                self.run_id,
+                self.stats.total,
+                self.stats.replied,
+                self.stats.skipped,
+                self.stats.errors,
+            )
             return self.stats
         except Exception:
             self._save_run(status="failed")
+            logger.info(
+                "Chat agent run failed: run_id=%s total=%s replied=%s skipped=%s errors=%s",
+                self.run_id,
+                self.stats.total,
+                self.stats.replied,
+                self.stats.skipped,
+                self.stats.errors,
+            )
             raise
 
     def _get_resume_map(self) -> dict[str, dict]:
@@ -182,6 +259,14 @@ class ChatAgentService:
             )
         )
         decision = self._normalize_decision(reply)
+        logger.info(
+            "Negotiation %s LLM decision: action=%s reply_mode=%s messages=%s reason=%r",
+            negotiation["id"],
+            decision["action"],
+            decision["reply_mode"],
+            len(decision["reply_messages"]),
+            decision["reason"],
+        )
 
         if decision["action"] != "reply" or not decision["reply_messages"]:
             self._save_decision(
@@ -194,6 +279,11 @@ class ChatAgentService:
                 reasoning_details=reply.reasoning_details,
             )
             self.stats.skipped += 1
+            self._log_negotiation_outcome(
+                negotiation,
+                "skipped",
+                reason=decision["reason"] or "model_skip",
+            )
             print(
                 f"⏭️ Пропущен чат {negotiation['id']}: {decision['reason'] or 'model_skip'}"
             )
@@ -201,6 +291,12 @@ class ChatAgentService:
 
         if self.config.dry_run:
             self.stats.replied += 1
+            self._log_negotiation_outcome(
+                negotiation,
+                "dry-run reply",
+                reply_mode=decision["reply_mode"],
+                messages=len(decision["reply_messages"]),
+            )
             print(
                 f"🧪 dry-run чат {negotiation['id']}: {self._render_reply_text(decision)}"
             )
@@ -221,6 +317,12 @@ class ChatAgentService:
             decision=decision,
         )
         self.stats.replied += 1
+        self._log_negotiation_outcome(
+            negotiation,
+            "reply queued",
+            reply_mode=decision["reply_mode"],
+            messages=len(decision["reply_messages"]),
+        )
         self._dispatch_source_outbox(
             negotiation=int(negotiation["id"]),
             source_last_message_id=str(last_message["id"]),
@@ -612,6 +714,12 @@ class ChatAgentService:
         persist: bool = True,
     ) -> None:
         self.stats.skipped += 1
+        self._log_negotiation_outcome(
+            negotiation,
+            "skipped",
+            reason=reason,
+            last_message_id=(last_message or {}).get("id") or "-",
+        )
         if (
             persist
             and last_message

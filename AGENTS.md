@@ -36,11 +36,11 @@ The default branch is `main`.
 ```
 
 ### Key Modules
-- **HHApplicantTool (`main.py`)**: формирует parser, динамически регистрирует команды из `operations`, предоставляет shared services для операций.
+- **HHApplicantTool (`main.py`)**: формирует parser, динамически регистрирует команды из `operations`, предоставляет shared services для операций. Настраивает логгеры `hh_applicant_tool` и `hh_llm_agent`.
 - **ApiClient/OAuthClient (`api/client.py`)**: обертка над `requests` c rate-delay, авторизационными заголовками и авто-refresh access token.
 - **StorageFacade (`storage/facade.py`)**: единая точка доступа к persistence-слою SQLite, включая репозитории агента.
-- **Chat Agent Operation (`src/hh_applicant_tool/operations/chat_agent.py`)**: CLI-адаптер для `hh_llm_agent`, поддерживает one-shot и daemon-loop режимы.
-- **ChatAgentService (`hh_llm_agent/service.py`)**: основной workflow автоответов: batch-run, quiet hours, debounce свежих сообщений работодателя, single-reply/QA-series планирование, outbox и audit в SQLite.
+- **Chat Agent Operation (`src/hh_applicant_tool/operations/chat_agent.py`)**: CLI-адаптер для `hh_llm_agent`, поддерживает one-shot и daemon-loop режимы. Отвечает за daemon циклы, quiet hours логирование и cycle summary.
+- **ChatAgentService (`hh_llm_agent/service.py`)**: основной workflow автоответов: batch-run, quiet hours, debounce свежих сообщений работодателя, single-reply/QA-series планирование, outbox и audit в SQLite. Логирует run lifecycle, negotiation start/outcome и LLM решения на INFO.
 - **OpenRouterChatClient (`hh_llm_agent/openrouter.py`)**: клиент OpenRouter через SDK `openai` с reasoning и JSON repair.
 - **TimingPolicy (`hh_llm_agent/timing.py`)**: политика сна агента, quiet hours по таймзоне, jitter между циклами и сообщениями.
 
@@ -76,7 +76,44 @@ The default branch is `main`.
   - `agent_decisions` - решения модели, причины skip, reply text, raw_response, reasoning_details
   - `agent_outbox` - отложенные части Q/A-серий, их статус, время отправки и ошибки
 
-### 3. Conventions
+### 3. Logging (INFO level)
+Chat agent пишет подробные INFO-логи на каждом этапе работы:
+
+**Namespace & handlers:**
+- Настроены два логгера: `hh_applicant_tool` и `hh_llm_agent`
+- Daemon-режим автоматически поднимает консольный уровень до INFO (чтобы видно было в `docker logs`)
+- `setup_logger()` очищает дублирующиеся handlers перед настройкой
+- В лог-файл (`config/<profile>/log.txt`) пишется всё (DEBUG)
+- В контейнер выводятся INFO и выше
+
+**Chat Agent Operation logs (`operations/chat_agent.py`):**
+- Startup banner: профиль, модель, `dry_run`, timezone, quiet hours, текущее локальное время, sleep window
+- Quiet hours: явный лог при входе в ночной режим с `sleeping_until` (timestamp пробуждения)
+- Cycle start: номер цикла
+- Cycle summary: `total/replied/skipped/errors` по результатам цикла
+- Cycle sleep: сколько секунд до следующего цикла
+
+**ChatAgentService logs (`hh_llm_agent/service.py`):**
+- Run started: `run_id`, `dry_run`, `limit`, `resume_id`, `only_invitations`, `skip_blacklisted`, `force`
+- Context loaded: имя кандидата, количество резюме и работодателей в blacklist
+- Negotiation start: `negotiation_id`, вакансия, работодатель, статус, резюме
+- Negotiation outcome (skip): причина (например, `blacklisted`, `no_messages`, `outside_period`, `already_processed`)
+- LLM decision: `action` (reply/skip), `reply_mode` (single/qa_series), количество сообщений, `reason`
+- Negotiation outcome (reply): тип ответа, режим, количество сообщений
+- Run completed/failed: `run_id`, финальная статистика `total/replied/skipped/errors`
+
+**Для отладки (DEBUG):**
+- Полные запросы/ответы API
+- Детали LLM-промптов (контекст, история сообщений)
+- Технические детали OpenRouter-вызовов
+- Полное состояние internal-объектов
+
+**Важно:**
+- INFO-логи не содержат полных текстов сообщений, чтобы не светить данные
+- Все sensitive-данные (токены, длинные ID) редактируются в лог-файле через `RedactingFilter`
+- При одновременной работе двух сервисов с одним профилем они пишут в один `log.txt` — в будущем можно разделить
+
+### 4. Conventions
 - **CLI aliases**: для пользовательских команд часто задаются короткие алиасы (`auth`, `apply`, `ls` и т.п.).
 - **Config/profile model**: профиль выбирается через `--profile-id` или `HH_PROFILE_ID`; данные лежат в каталоге профиля.
 - **Error handling**: в `HHApplicantTool.run()` централизованно обрабатываются API/SQLite/runtime исключения, лог пишется в профильный `log.txt`.
@@ -134,6 +171,7 @@ The default branch is `main`.
 - `docker-compose.llm-agent.yml` запускает только daemon-сервис `llm_agent`.
 - `Dockerfile.llm-agent` не включает Chromium/playwright/cron и должен оставаться легковесным.
 - Контейнер LLM-агента по умолчанию запускает `chat-agent --daemon`.
+- В `docker-compose.llm-agent.yml` используется флаг `-v` для вывода INFO-логов в контейнер.
 
 ## Instructions for Agents
 1. Сначала прочитай `README.md` и `src/hh_applicant_tool/main.py`, чтобы понять runtime и список доступных операций.
@@ -141,6 +179,7 @@ The default branch is `main`.
 3. Если меняешь LLM-агент, смотри и CLI-адаптер `src/hh_applicant_tool/operations/chat_agent.py`, и root-level модуль `hh_llm_agent/`.
 4. Для изменений БД синхронизируй `storage/models`, `storage/repositories` и SQL-схему в `storage/queries/schema.sql`.
 5. Если меняешь audit/state логику агента, проверь согласованность таблиц `chat_messages`, `agent_runs`, `agent_decisions`, `agent_outbox`.
-6. Не коммить секреты и runtime-артефакты из `config/`, `.env`, токены, cookies и локальные DB/log файлы.
-7. Для проверки изменений запускай минимум `pytest`, а для CLI-поведения - целевую команду через `python -m hh_applicant_tool ...`.
-8. Для OpenRouter-логики отдельно полезно гонять `tests/test_openrouter_client.py`.
+6. При изменении логирования проверь тесты `tests/test_chat_agent_service.py` и `tests/test_chat_agent_operation.py` для подтверждения формата INFO-логов.
+7. Не коммить секреты и runtime-артефакты из `config/`, `.env`, токены, cookies и локальные DB/log файлы.
+8. Для проверки изменений запускай минимум `pytest`, а для CLI-поведения - целевую команду через `python -m hh_applicant_tool ...`.
+9. Для OpenRouter-логики отдельно полезно гонять `tests/test_openrouter_client.py`.
