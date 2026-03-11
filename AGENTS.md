@@ -102,7 +102,6 @@ The default branch is `main`.
 - Environment variables from `.env.example`:
   - `OPENROUTER_API_KEY` (обязателен)
   - `OPENROUTER_MODEL`
-  - `OPENROUTER_BASE_URL`
   - `CHAT_AGENT_TEMPERATURE`
   - `CHAT_AGENT_DRY_RUN` (альтернатива: `HH_AGENT_DRY_RUN`)
   - `CHAT_AGENT_POLL_INTERVAL` (дефолт: 60 секунд)
