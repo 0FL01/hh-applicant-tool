@@ -311,27 +311,21 @@ class Operation(BaseOperation):
         return "|".join(escaped)
 
     @classmethod
-    def _merge_excluded_filters(
+    def _build_env_excluded_filter(
         cls,
-        cli_filter: str | None,
         env_keywords: str | None,
     ) -> str | None:
-        filters = []
-
-        if cli_filter:
-            filters.append(f"(?:{cli_filter})")
-
         keywords = cls._parse_excluded_keywords(env_keywords)
         keywords_filter = cls._build_keywords_regex(keywords)
         if keywords_filter:
-            filters.append(f"(?:{keywords_filter})")
             logger.info(
                 "Добавлен фильтр по %d ключевым словам из %s",
                 len(keywords),
                 cls.excluded_keywords_env_name,
             )
+            return f"(?:{keywords_filter})"
 
-        return "|".join(filters) if filters else None
+        return None
 
     @property
     def api_client(self):
@@ -369,8 +363,8 @@ class Operation(BaseOperation):
         self.employer_id = args.employer_id
         self.employment = args.employment
         self.excluded_employer_id = args.excluded_employer_id
-        self.excluded_filter = self._merge_excluded_filters(
-            cli_filter=args.excluded_filter,
+        self.excluded_filter = args.excluded_filter
+        self.excluded_keywords_filter = self._build_env_excluded_filter(
             env_keywords=env_excluded_keywords,
         )
         self.experience = args.experience
@@ -1038,6 +1032,20 @@ class Operation(BaseOperation):
                 return
 
     def _is_filtered(self, vacancy: SearchVacancy) -> bool:
+        if (
+            not self.excluded_filter
+            and not self.excluded_keywords_filter
+            and not self.max_responses
+        ):
+            return False
+
+        if self.excluded_keywords_filter:
+            keywords_pat: re.Pattern = re.compile(
+                self.excluded_keywords_filter, re.IGNORECASE
+            )
+            if keywords_pat.search(vacancy["name"]):
+                return True
+
         if not self.excluded_filter and not self.max_responses:
             return False
 
