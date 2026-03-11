@@ -21,7 +21,7 @@ COPY hh_llm_agent /app/hh_llm_agent
 COPY pyproject.toml poetry.lock* README.md .env.example /app/
 
 # Устанавливаем зависимости (без playwright и pillow - не нужны для LLM агента)
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir '.'
 
 # Создаем директорию для конфигов с правами пользователя
 RUN mkdir -p /app/config && \

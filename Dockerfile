@@ -18,12 +18,15 @@ RUN groupadd -g $GID docker && \
 
 WORKDIR /app
 
-# Копируем файлы пакета
+# Копируем файлы пакета (без hh_llm_agent — он для отдельного контейнера)
 COPY src /app/src
 COPY pyproject.toml poetry.lock* README.md /app/
 
-# И ставим его
-RUN pip install --no-cache-dir -e '.[playwright,pillow]'
+# Создаем фейковую директорию hh_llm_agent для Poetry
+RUN mkdir -p /app/hh_llm_agent && echo "# Placeholder for Poetry" > /app/hh_llm_agent/__init__.py
+
+# И ставим его (без -e, чтобы не требовался hh_llm_agent)
+RUN pip install --no-cache-dir '.[playwright,pillow]'
 
 # Ставим зависимости хромиума и сам хромиум пользователю docker
 RUN playwright install-deps chromium && \
@@ -36,7 +39,6 @@ RUN rm -rf /var/lib/apt/lists/*
 #RUN mkdir -p /app/config
 
 # Копируем остальное (эти файлы мешают кешированию последующих слоев)
-COPY config /app/config
 COPY crontab /app/crontab
 COPY startup.sh /app/startup.sh
 
@@ -51,6 +53,7 @@ RUN touch /var/log/cron.log && chown docker:docker /var/log/cron.log && \
 # cron не видит переменные окружения, переданные главному процессу, точнее
 # он начинает новую сессию, где тот же $CONFIG_DIR пуст
 CMD printenv | grep -E 'CONFIG_DIR|HH_PROFILE_ID' >> /etc/environment && \
+  mkdir -p /app/config && \
   chown -R docker:docker /app/config && \
   cron && \
   tail -f /var/log/cron.log

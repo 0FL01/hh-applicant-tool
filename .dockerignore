@@ -35,7 +35,8 @@ poetry.lock
 
 # Environment variables (секреты!)
 .env
-.env.*
+.env.local
+.env.*.local
 
 # Logs
 config/log*.txt
