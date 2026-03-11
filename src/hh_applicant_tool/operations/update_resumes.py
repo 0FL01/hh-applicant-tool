@@ -35,7 +35,13 @@ class Operation(BaseOperation):
 
         for resume in resumes:
             if not resume.get("can_publish_or_update"):
-                logger.warning(f"Не могу обновить: {resume['alternate_url']}")
+                next_publish_at = resume.get("next_publish_at")
+                msg = f"Не могу обновить: {resume['alternate_url']}"
+
+                if next_publish_at:
+                    msg += f" (доступно после: {next_publish_at})"
+
+                logger.warning(msg)
                 continue
             try:
                 r = tool.api_client.post(
