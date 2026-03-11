@@ -47,6 +47,18 @@ class AgentConfig:
     force: bool = False
 
 
+def _parse_env_bool(name: str) -> bool | None:
+    value = getenv(name)
+    if value is None:
+        return None
+    value = value.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
 def _get_nested(data: dict[str, Any], path: str, default: Any = None) -> Any:
     current: Any = data
     for key in path.split("."):
@@ -145,6 +157,9 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         or getenv("CHAT_AGENT_REPLY_INSTRUCTION")
         or DEFAULT_REPLY_INSTRUCTION
     )
+    dry_run = _parse_env_bool("CHAT_AGENT_DRY_RUN")
+    if dry_run is None:
+        dry_run = _parse_env_bool("HH_AGENT_DRY_RUN")
 
     openrouter = OpenRouterConfig(
         api_key=api_key,
@@ -171,7 +186,11 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         only_invitations=getattr(args, "only_invitations", None)
         if getattr(args, "only_invitations", None) is not None
         else agent_cfg.get("only_invitations", False),
-        dry_run=getattr(args, "dry_run", False),
+        dry_run=getattr(args, "dry_run", None)
+        if getattr(args, "dry_run", None) is not None
+        else (
+            dry_run if dry_run is not None else agent_cfg.get("dry_run", False)
+        ),
         limit=getattr(args, "limit", None) or agent_cfg.get("limit"),
         resume_id=getattr(args, "resume_id", None)
         or agent_cfg.get("resume_id"),

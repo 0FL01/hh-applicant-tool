@@ -255,83 +255,6 @@ services:
 
   # Общий шаблон для новых профилей
   уникальное_имя_сервиса:
-
----
-
-## Запуск LLM-агента через Docker
-
-Для запуска LLM-агента используется отдельный Dockerfile и docker-compose, которые не требуют установки Chromium и других тяжеловесных зависимостей.
-
-### Сборка образа
-
-```sh
-docker compose -f docker-compose.llm-agent.yml build
-```
-
-### Настройка
-
-Скопируйте пример конфига и настройте его:
-
-```sh
-cp .env.example .env
-```
-
-В `.env` обязательно укажите:
-
-```sh
-OPENROUTER_API_KEY=your_openrouter_api_key_here
-```
-
-### Запуск агента в режиме dry-run
-
-Для безопасного тестирования без реальной отправки сообщений:
-
-```sh
-docker compose -f docker-compose.llm-agent.yml run --rm llm_agent chat-agent --dry-run --limit 5
-```
-
-### Запуск одноразового агента (one-shot)
-
-Для одноразового запуска агента с ограничением по количеству чатов:
-
-```sh
-docker compose -f docker-compose.llm-agent.yml --profile oneshot run --rm llm_agent_run
-```
-
-### Демонный запуск (background)
-
-Для постоянного запуска агента в фоне:
-
-```sh
-docker compose -f docker-compose.llm-agent.yml up -d llm_agent
-```
-
-Просмотр логов:
-
-```sh
-docker compose -f docker-compose.llm-agent.yml logs -f llm_agent
-```
-
-Остановка:
-
-```sh
-docker compose -f docker-compose.llm-agent.yml down
-```
-
-### Пересборка образа после изменений
-
-```sh
-docker compose -f docker-compose.llm-agent.yml up -d --build llm_agent
-```
-
-### Особенности
-
-- Контейнер работает от пользователя `llmagent` (UID/GID 1000 по умолчанию)
-- Конфиги и база данных хранятся в `config/` как и при локальном запуске
-- По умолчанию включен `dry-run` режим для безопасности
-- Модель по умолчанию: `google/gemini-3.1-flash-lite-preview`
-
----
     extends: hh_applicant_tool
     # может совпадать с именем сервиса
     container_name: уникальное_имя_контейнера
@@ -384,6 +307,74 @@ docker@1897bdd7c80b:/app$
 ```
 
 В файлах `startup.sh` и `crontab` замените `/usr/local/bin/python -m hh_applicant_tool apply-vacancies` на `/bin/sh /app/apply-vacancies.sh`.
+
+---
+
+## Запуск LLM-агента через Docker
+
+Для запуска LLM-агента используется отдельный Dockerfile и docker-compose, которые не требуют установки Chromium и других тяжеловесных зависимостей.
+
+### Сборка образа
+
+```sh
+docker compose -f docker-compose.llm-agent.yml build
+```
+
+### Настройка
+
+Скопируйте пример конфига и настройте его:
+
+```sh
+cp .env.example .env
+```
+
+В `.env` обязательно укажите:
+
+```sh
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+```
+
+### Запуск агента в режиме dry-run
+
+Для безопасного тестирования без реальной отправки сообщений:
+
+```sh
+docker compose -f docker-compose.llm-agent.yml run --rm llm_agent chat-agent --dry-run --limit 5
+```
+
+### Демонный запуск (background)
+
+Для постоянного запуска агента в фоне контейнер стартует `chat-agent --daemon` и работает, пока запущен контейнер:
+
+```sh
+docker compose -f docker-compose.llm-agent.yml up -d llm_agent
+```
+
+Просмотр логов:
+
+```sh
+docker compose -f docker-compose.llm-agent.yml logs -f llm_agent
+```
+
+Остановка:
+
+```sh
+docker compose -f docker-compose.llm-agent.yml down
+```
+
+### Пересборка образа после изменений
+
+```sh
+docker compose -f docker-compose.llm-agent.yml up -d --build llm_agent
+```
+
+### Особенности
+
+- Контейнер работает от пользователя `llmagent` (UID/GID 1000 по умолчанию)
+- Конфиги и база данных хранятся в `config/` как и при локальном запуске
+- По умолчанию контейнер запускает именно daemon-режим агента
+- Частота опроса задается через `CHAT_AGENT_POLL_INTERVAL`
+- Модель по умолчанию: `google/gemini-3.1-flash-lite-preview`
 
 ---
 

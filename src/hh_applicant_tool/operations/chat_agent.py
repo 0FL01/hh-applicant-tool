@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
+from os import getenv
 from typing import TYPE_CHECKING
 
 from hh_llm_agent.service import ChatAgentService
@@ -31,6 +33,8 @@ class Namespace(BaseNamespace):
     openrouter_api_key: str | None
     openrouter_base_url: str | None
     force: bool
+    daemon: bool
+    poll_interval: int
 
 
 class Operation(BaseOperation):
@@ -112,8 +116,25 @@ class Operation(BaseOperation):
             default=False,
             help="Повторно обработать чат даже если последнее сообщение уже разбиралось",
         )
+        parser.add_argument(
+            "--daemon",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Запускать агент в бесконечном цикле, пока процесс не будет остановлен",
+        )
+        parser.add_argument(
+            "--poll-interval",
+            type=int,
+            default=int(getenv("CHAT_AGENT_POLL_INTERVAL", "60")),
+            help="Пауза между циклами опроса чатов в секундах",
+        )
 
     def run(self, tool: HHApplicantTool) -> None:
+        if tool.args.daemon:
+            return self._run_daemon(tool)
+        return self._run_once(tool)
+
+    def _run_once(self, tool: HHApplicantTool) -> None:
         stats = ChatAgentService(tool, tool.args).run()
         logger.info(
             "Chat agent finished: total=%s replied=%s skipped=%s errors=%s",
@@ -129,3 +150,29 @@ class Operation(BaseOperation):
             f"пропусков={stats.skipped}",
             f"ошибок={stats.errors}",
         )
+
+    def _run_daemon(self, tool: HHApplicantTool) -> None:
+        interval = max(1, tool.args.poll_interval)
+        logger.info(
+            "Starting chat agent daemon with poll interval %s seconds",
+            interval,
+        )
+        print(f"🤖 Chat agent daemon started, poll interval: {interval}s")
+        cycle = 0
+        while True:
+            cycle += 1
+            logger.info("Chat agent daemon cycle %s started", cycle)
+            try:
+                self._run_once(tool)
+                tool.save_token()
+                tool.save_cookies()
+            except KeyboardInterrupt:
+                raise
+            except Exception:
+                logger.exception("Chat agent daemon cycle %s failed", cycle)
+            logger.info(
+                "Chat agent daemon cycle %s finished, sleeping %s seconds",
+                cycle,
+                interval,
+            )
+            time.sleep(interval)

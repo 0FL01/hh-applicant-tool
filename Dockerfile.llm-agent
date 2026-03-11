@@ -30,6 +30,6 @@ RUN mkdir -p /app/config && \
 # Переключаемся на пользователя
 USER llmagent
 
-# Запускаем агента (по умолчанию с --help для проверки)
+# По умолчанию запускаем daemon-режим агента
 ENTRYPOINT ["python", "-m", "hh_applicant_tool"]
-CMD ["chat-agent", "--help"]
+CMD ["chat-agent", "--daemon"]
