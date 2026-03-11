@@ -9,6 +9,7 @@ import re
 import time
 from email.message import EmailMessage
 from itertools import chain
+from os import getenv
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
 from urllib.parse import urlparse
@@ -272,6 +273,22 @@ class Operation(BaseOperation):
 
     cover_letter: str = "{Здравствуйте|Добрый день}, меня зовут %(first_name)s. {Прошу|Предлагаю} рассмотреть {мою кандидатуру|мое резюме «%(resume_title)s»} на вакансию «%(vacancy_name)s». С уважением, %(first_name)s."
 
+    @staticmethod
+    def _parse_env_bool(value: str | None) -> bool | None:
+        if value is None:
+            return None
+
+        normalized_value = value.strip().lower()
+        if normalized_value in {"1", "true", "yes", "on"}:
+            return True
+        if normalized_value in {"0", "false", "no", "off"}:
+            return False
+
+        logger.warning(
+            "Некорректное булево значение HH_APPLY_FORCE_MESSAGE=%r", value
+        )
+        return None
+
     @property
     def api_client(self):
         return self.tool.api_client
@@ -286,11 +303,18 @@ class Operation(BaseOperation):
     ) -> None:
         self.tool = tool
         args = self.args
+        env_force_message = self._parse_env_bool(
+            getenv("HH_APPLY_FORCE_MESSAGE")
+        )
+        env_cover_letter = getenv("HH_APPLY_COVER_LETTER")
+
         self.cover_letter = (
             args.letter_file.read_text(encoding="utf-8", errors="ignore")
             if args.letter_file
             else self.cover_letter
         )
+        if env_cover_letter:
+            self.cover_letter = env_cover_letter
         self.area = args.area
         self.bottom_lat = args.bottom_lat
         self.currency = args.currency
@@ -302,7 +326,11 @@ class Operation(BaseOperation):
         self.excluded_employer_id = args.excluded_employer_id
         self.excluded_filter = args.excluded_filter
         self.experience = args.experience
-        self.force_message = args.force_message
+        self.force_message = (
+            args.force_message
+            if args.force_message is not None
+            else bool(env_force_message)
+        )
         self.industry = args.industry
         self.label = args.label
         self.left_lng = args.left_lng
