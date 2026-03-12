@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from openai import OpenAI
 
 from .config import OpenRouterConfig
+
+logger = logging.getLogger(__package__)
 
 
 class OpenRouterError(Exception):
@@ -29,6 +32,9 @@ class LLMReply:
 
 class OpenRouterChatClient:
     RESPONSE_HEALING_PLUGIN_ID = "response-healing"
+    PROVIDER_ROUTING_ERROR = (
+        "No endpoints found that can handle the requested parameters"
+    )
 
     def __init__(
         self,
@@ -86,12 +92,13 @@ class OpenRouterChatClient:
             },
         }
 
-    def _create(
+    def _build_request(
         self,
         messages: list[dict[str, Any]],
         *,
         schema: StructuredOutputSchema | None = None,
-    ) -> LLMReply:
+        require_parameters: bool = False,
+    ) -> dict[str, Any]:
         extra_body: dict[str, Any] = {
             "reasoning": {"enabled": self.config.reasoning_enabled}
         }
@@ -104,12 +111,58 @@ class OpenRouterChatClient:
         }
         if schema is not None:
             request["response_format"] = self._response_format(schema)
-            extra_body["provider"] = {"require_parameters": True}
             extra_body["plugins"] = [{"id": self.RESPONSE_HEALING_PLUGIN_ID}]
+            if require_parameters:
+                extra_body["provider"] = {"require_parameters": True}
+        return request
+
+    def _is_provider_routing_error(self, ex: Exception) -> bool:
+        if getattr(ex, "status_code", None) != 404:
+            return False
+
+        parts = [str(ex)]
+        body = getattr(ex, "body", None)
+        if isinstance(body, dict):
+            error = body.get("error")
+            if isinstance(error, dict) and error.get("message"):
+                parts.append(str(error["message"]))
+
+        message = " ".join(parts)
+        return self.PROVIDER_ROUTING_ERROR in message
+
+    def _send_request(self, request: dict[str, Any]) -> Any:
+        return self.client.chat.completions.create(**request)
+
+    def _raise_request_error(self, ex: Exception) -> None:
+        raise OpenRouterError(f"OpenRouter request failed: {ex}") from ex
+
+    def _create(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        schema: StructuredOutputSchema | None = None,
+    ) -> LLMReply:
+        request = self._build_request(
+            messages,
+            schema=schema,
+            require_parameters=schema is not None,
+        )
         try:
-            response = self.client.chat.completions.create(**request)
+            response = self._send_request(request)
         except Exception as ex:
-            raise OpenRouterError(f"OpenRouter request failed: {ex}") from ex
+            if schema is None or not self._is_provider_routing_error(ex):
+                self._raise_request_error(ex)
+
+            logger.warning(
+                "OpenRouter provider routing is too strict for model %s; "
+                "retrying without require_parameters",
+                self.config.model,
+            )
+            fallback_request = self._build_request(messages, schema=schema)
+            try:
+                response = self._send_request(fallback_request)
+            except Exception as retry_ex:
+                self._raise_request_error(retry_ex)
         message = response.choices[0].message
         return LLMReply(
             content=self._normalize_content(message.content),

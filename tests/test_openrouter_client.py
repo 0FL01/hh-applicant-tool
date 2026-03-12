@@ -48,7 +48,10 @@ class FakeCompletions:
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class FakeClient:
@@ -59,6 +62,13 @@ class FakeClient:
             (),
             {"completions": completions},
         )()
+
+
+class FakeOpenRouterError(Exception):
+    def __init__(self, message, *, status_code=None, body=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
 
 
 def test_complete_json_parses_first_try():
@@ -142,3 +152,56 @@ def test_complete_json_raises_for_invalid_structured_json():
         )
 
     assert len(client.chat.completions.calls) == 1
+
+
+def test_complete_json_retries_without_require_parameters_on_provider_404():
+    client = FakeClient(
+        [
+            FakeOpenRouterError(
+                "Error code: 404",
+                status_code=404,
+                body={
+                    "error": {
+                        "message": "No endpoints found that can handle the requested parameters."
+                    }
+                },
+            ),
+            FakeResponse(
+                '{"action":"reply","reply_text":"Здравствуйте!","reason":"need_reply"}'
+            ),
+        ]
+    )
+    chat = OpenRouterChatClient(
+        config=type(
+            "Cfg",
+            (),
+            {
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "token",
+                "referer": "https://example.com",
+                "app_name": "test",
+                "model": "google/gemma-3-27b-it",
+                "temperature": 0.0,
+                "max_completion_tokens": 100,
+                "reasoning_enabled": False,
+            },
+        )(),
+        client=client,
+    )
+
+    result = chat.complete_json(
+        [{"role": "user", "content": "hi"}],
+        schema=TEST_SCHEMA,
+    )
+
+    assert result.parsed["action"] == "reply"
+    assert len(client.chat.completions.calls) == 2
+    assert client.chat.completions.calls[0]["extra_body"] == {
+        "reasoning": {"enabled": False},
+        "provider": {"require_parameters": True},
+        "plugins": [{"id": "response-healing"}],
+    }
+    assert client.chat.completions.calls[1]["extra_body"] == {
+        "reasoning": {"enabled": False},
+        "plugins": [{"id": "response-healing"}],
+    }
