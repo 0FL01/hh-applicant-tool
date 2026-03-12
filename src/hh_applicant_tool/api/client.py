@@ -255,12 +255,15 @@ class ApiClient(BaseClient):
             return do_request()
         # TODO: добавить класс для ошибок типа AccessTokenExpired
         except errors.Forbidden as ex:
-            if not self.is_access_expired or not self.refresh_token:
+            if not self.access_token or not self.refresh_token:
                 raise ex
-            logger.info("try to refresh access_token")
-            # Пробуем обновить токен
+            if self.is_access_expired:
+                logger.info("try to refresh access_token")
+            else:
+                logger.info(
+                    "try to refresh access_token after 403 before local expiry"
+                )
             self.refresh_access_token()
-            # И повторно отправляем запрос
             return do_request()
 
     def handle_access_token(self, token: AccessToken) -> None:
