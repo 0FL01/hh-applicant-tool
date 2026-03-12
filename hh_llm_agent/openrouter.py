@@ -42,6 +42,7 @@ class OpenRouterChatClient:
         client: OpenAI | None = None,
     ):
         self.config = config
+        self._fallback_logged = False
         self.client = client or OpenAI(
             base_url=config.base_url,
             api_key=config.api_key,
@@ -153,11 +154,12 @@ class OpenRouterChatClient:
             if schema is None or not self._is_provider_routing_error(ex):
                 self._raise_request_error(ex)
 
-            logger.warning(
-                "OpenRouter provider routing is too strict for model %s; "
-                "retrying without require_parameters",
-                self.config.model,
-            )
+            if not self._fallback_logged:
+                logger.info(
+                    "OpenRouter provider routing fallback enabled for model %s",
+                    self.config.model,
+                )
+                self._fallback_logged = True
             fallback_request = self._build_request(messages, schema=schema)
             try:
                 response = self._send_request(fallback_request)
