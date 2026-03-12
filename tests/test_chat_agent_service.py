@@ -12,7 +12,12 @@ sys.modules.setdefault("openai", openai_module)
 
 from hh_applicant_tool.storage import StorageFacade
 from hh_applicant_tool.api.errors import Forbidden
-from hh_llm_agent.config import AgentConfig, ClassifierConfig, OpenRouterConfig
+from hh_llm_agent.config import (
+    AgentConfig,
+    ClassifierConfig,
+    OpenRouterConfig,
+    WebhookConfig,
+)
 from hh_llm_agent.openrouter import LLMReply
 from hh_llm_agent.service import (
     CLASSIFIER_RESPONSE_SCHEMA,
@@ -94,6 +99,25 @@ class FakeGateway:
     def get_negotiations(self):
         return [NEGOTIATION]
 
+    def get_vacancy(self, vacancy_id):
+        assert vacancy_id == NEGOTIATION["vacancy"]["id"]
+        return {
+            **NEGOTIATION["vacancy"],
+            "contacts": {
+                "name": "Виктория",
+                "email": "v.vetkasova@wanted.ooo",
+                "phones": [],
+            },
+        }
+
+    def get_employer(self, employer_id):
+        assert employer_id == NEGOTIATION["vacancy"]["employer"]["id"]
+        return {
+            **NEGOTIATION["vacancy"]["employer"],
+            "site_url": "https://wanted.ooo",
+            "alternate_url": "https://hh.ru/employer/501",
+        }
+
     def fetch_messages(self, negotiation_id):
         assert negotiation_id == NEGOTIATION["id"]
         index = min(self.fetch_calls, len(self.responses) - 1)
@@ -154,8 +178,38 @@ class FakeLLMClient:
         return self.__class__.replies[self.config.model]
 
 
+class FakeWebhookClient:
+    instances = []
+    should_fail = False
+
+    def __init__(self, config, proxies=None):
+        self.config = config
+        self.proxies = proxies
+        self.calls = []
+        self.__class__.instances.append(self)
+
+    @classmethod
+    def reset(cls):
+        cls.instances = []
+        cls.should_fail = False
+
+    def send(self, *, event_type, idempotency_key, payload):
+        self.calls.append(
+            {
+                "event_type": event_type,
+                "idempotency_key": idempotency_key,
+                "payload": payload,
+            }
+        )
+        if self.__class__.should_fail:
+            raise RuntimeError("webhook delivery failed")
+
+
 def make_tool():
-    return SimpleNamespace(storage=StorageFacade(sqlite3.connect(":memory:")))
+    return SimpleNamespace(
+        storage=StorageFacade(sqlite3.connect(":memory:")),
+        session=SimpleNamespace(proxies={}),
+    )
 
 
 def make_config(
@@ -163,6 +217,7 @@ def make_config(
     dry_run,
     incoming_collect_seconds=0,
     classifier_enabled=True,
+    webhook_enabled=False,
 ):
     return AgentConfig(
         openrouter=OpenRouterConfig(api_key="token", model=REPLY_MODEL),
@@ -188,6 +243,16 @@ def make_config(
             qa_series_delay_max_seconds=0,
             wake_jitter_seconds=0,
         ),
+        webhook=(
+            WebhookConfig(
+                url="https://example.com/hook",
+                timeout_seconds=3.0,
+                max_attempts=3,
+                retry_base_seconds=5.0,
+            )
+            if webhook_enabled
+            else None
+        ),
     )
 
 
@@ -199,6 +264,7 @@ def make_service(
     dry_run,
     incoming_collect_seconds=0,
     classifier_enabled=True,
+    webhook_enabled=False,
 ):
     monkeypatch.setattr(
         "hh_llm_agent.service.load_agent_config",
@@ -206,12 +272,17 @@ def make_service(
             dry_run=dry_run,
             incoming_collect_seconds=incoming_collect_seconds,
             classifier_enabled=classifier_enabled,
+            webhook_enabled=webhook_enabled,
         ),
     )
     monkeypatch.setattr("hh_llm_agent.service.HHGateway", lambda tool: gateway)
     monkeypatch.setattr(
         "hh_llm_agent.service.OpenRouterChatClient",
         FakeLLMClient,
+    )
+    monkeypatch.setattr(
+        "hh_llm_agent.service.WebhookClient",
+        FakeWebhookClient,
     )
     service = ChatAgentService(tool, SimpleNamespace())
     service.sleep_fn = lambda seconds: None
@@ -384,6 +455,7 @@ def test_failed_pending_outbox_does_not_block_run(monkeypatch):
 
 def test_classifier_skip_prevents_reply_generation(monkeypatch):
     FakeLLMClient.reset()
+    FakeWebhookClient.reset()
     FakeLLMClient.replies[CLASSIFIER_MODEL] = LLMReply(
         content='{"action":"skip","category":"passive_update","reason":"auto_ack","confidence":0.99}',
         parsed={
@@ -406,6 +478,64 @@ def test_classifier_skip_prevents_reply_generation(monkeypatch):
     assert decisions[0].classifier_category == "passive_update"
     assert decisions[0].classifier_reason == "auto_ack"
     assert decisions[0].classifier_model == CLASSIFIER_MODEL
+
+
+def test_recruiter_contact_offer_sends_webhook(monkeypatch):
+    FakeLLMClient.reset()
+    FakeWebhookClient.reset()
+    recruiter_message = {
+        **EMPLOYER_MESSAGE,
+        "text": (
+            "Андрей, здравствуйте!\n"
+            "Меня зовут Виктория, я представляю команду IT-рекрутинга компании Wanted.\n"
+            "Спасибо за ваш отклик. Хотела бы продолжить общение.\n"
+            "С уважением,\n"
+            "Веткасова Виктория\n"
+            "telegram: t.me/ithr_victoria\n"
+            "mail: v.vetkasova@wanted.ooo"
+        ),
+    }
+    FakeLLMClient.replies[CLASSIFIER_MODEL] = LLMReply(
+        content='{"action":"skip","category":"recruiter_contact_offer","reason":"direct_contacts_shared","confidence":0.97}',
+        parsed={
+            "action": "skip",
+            "category": "recruiter_contact_offer",
+            "reason": "direct_contacts_shared",
+            "confidence": 0.97,
+        },
+    )
+    tool = make_tool()
+    gateway = FakeGateway(responses=[[recruiter_message]])
+
+    service = make_service(
+        monkeypatch,
+        tool,
+        gateway,
+        dry_run=False,
+        webhook_enabled=True,
+    )
+    stats = service.run()
+
+    assert stats.skipped == 1
+    assert len(FakeLLMClient.by_model(CLASSIFIER_MODEL)[0].calls) == 1
+    assert len(FakeLLMClient.by_model(REPLY_MODEL)[0].calls) == 0
+    assert len(FakeWebhookClient.instances) == 1
+    assert len(FakeWebhookClient.instances[0].calls) == 1
+    call = FakeWebhookClient.instances[0].calls[0]
+    assert call["event_type"] == "recruiter_contact_offer"
+    assert call["payload"]["vacancy"]["name"] == "Platform Engineer"
+    assert call["payload"]["contacts"]["from_message"]["emails"] == [
+        "v.vetkasova@wanted.ooo"
+    ]
+    assert call["payload"]["contacts"]["from_message"]["telegram_handles"] == [
+        "ithr_victoria"
+    ]
+    decisions = list(tool.storage.agent_decisions.find())
+    assert len(decisions) == 1
+    assert decisions[0].classifier_category == "recruiter_contact_offer"
+    webhook_items = list(tool.storage.agent_webhooks.find())
+    assert len(webhook_items) == 1
+    assert webhook_items[0].status == "sent"
 
 
 def test_qa_series_is_queued_and_sent_in_order(monkeypatch):

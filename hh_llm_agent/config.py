@@ -31,13 +31,17 @@ DEFAULT_REPLY_INSTRUCTION = (
 DEFAULT_CLASSIFIER_INSTRUCTION = (
     "Проанализируй переписку. action может быть только reply или skip. "
     "category может быть только human_actionable, bot_actionable, "
-    "passive_update, marketing_broadcast, system_event или irrelevant. "
+    "passive_update, marketing_broadcast, recruiter_contact_offer, "
+    "system_event или irrelevant. "
     "reply ставь только если в последнем неотвеченном пакете есть прямой "
     "вопрос, screening, просьба подтвердить интерес, сообщить данные или "
     "выполнить следующий шаг. Нумерованные анкеты, скрининг-опросники, "
     "формулировки вида 'ответьте на несколько вопросов' и списки вопросов "
     "всегда считай human_actionable с action=reply, даже если сообщение "
-    "выглядит шаблонным. skip ставь только для автоуведомлений, брендовых "
+    "выглядит шаблонным. recruiter_contact_offer ставь с action=skip, если "
+    "рекрутер приглашает продолжить общение и оставляет прямые контакты "
+    "вне hh.ru: email, telegram, телефон, ссылку на мессенджер или иной "
+    "канал связи. skip ставь только для автоуведомлений, брендовых "
     "рассылок, thank-you сообщений без действия, системных событий и прочего "
     "шума. confidence - число от 0 до 1."
 )
@@ -68,9 +72,21 @@ class ClassifierConfig:
 
 
 @dataclass(frozen=True)
+class WebhookConfig:
+    url: str
+    enabled: bool = True
+    timeout_seconds: float = 10.0
+    secret: str | None = None
+    secret_header: str = "X-Webhook-Secret"
+    max_attempts: int = 3
+    retry_base_seconds: float = 30.0
+
+
+@dataclass(frozen=True)
 class AgentConfig:
     openrouter: OpenRouterConfig
     classifier: ClassifierConfig | None = None
+    webhook: WebhookConfig | None = None
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     reply_instruction: str = DEFAULT_REPLY_INSTRUCTION
     max_history_messages: int = 12
@@ -146,6 +162,7 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
     openrouter_cfg = config.get("openrouter", {})
     agent_cfg = config.get("chat_agent", {})
     classifier_cfg = _get_nested(agent_cfg, "classifier", {}) or {}
+    webhook_cfg = _get_nested(agent_cfg, "webhook", {}) or {}
 
     api_key = (
         getattr(args, "openrouter_api_key", None)
@@ -345,6 +362,65 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         max_history_messages=classifier_max_history_messages,
     )
 
+    webhook_url = _env_or_value(
+        "CHAT_AGENT_WEBHOOK_URL",
+        getattr(args, "webhook_url", None),
+        webhook_cfg.get("url"),
+        None,
+        lambda value: str(value).strip() or None,
+    )
+    webhook_enabled = _env_bool_or_value(
+        "CHAT_AGENT_WEBHOOK_ENABLED",
+        getattr(args, "webhook_enabled", None),
+        webhook_cfg.get("enabled"),
+        bool(webhook_url),
+    )
+    webhook: WebhookConfig | None = None
+    if webhook_enabled:
+        if not webhook_url:
+            raise ValueError(
+                "Webhook is enabled but CHAT_AGENT_WEBHOOK_URL is not set."
+            )
+        webhook = WebhookConfig(
+            url=webhook_url,
+            enabled=True,
+            timeout_seconds=_env_or_value(
+                "CHAT_AGENT_WEBHOOK_TIMEOUT_SECONDS",
+                getattr(args, "webhook_timeout_seconds", None),
+                webhook_cfg.get("timeout_seconds"),
+                10.0,
+                float,
+            ),
+            secret=_env_or_value(
+                "CHAT_AGENT_WEBHOOK_SECRET",
+                getattr(args, "webhook_secret", None),
+                webhook_cfg.get("secret"),
+                None,
+                lambda value: str(value) if value is not None else None,
+            ),
+            secret_header=_env_or_value(
+                "CHAT_AGENT_WEBHOOK_SECRET_HEADER",
+                getattr(args, "webhook_secret_header", None),
+                webhook_cfg.get("secret_header"),
+                "X-Webhook-Secret",
+                str,
+            ),
+            max_attempts=_env_or_value(
+                "CHAT_AGENT_WEBHOOK_MAX_ATTEMPTS",
+                getattr(args, "webhook_max_attempts", None),
+                webhook_cfg.get("max_attempts"),
+                3,
+                int,
+            ),
+            retry_base_seconds=_env_or_value(
+                "CHAT_AGENT_WEBHOOK_RETRY_BASE_SECONDS",
+                getattr(args, "webhook_retry_base_seconds", None),
+                webhook_cfg.get("retry_base_seconds"),
+                30.0,
+                float,
+            ),
+        )
+
     quiet_hours_enabled = _env_bool_or_value(
         "CHAT_AGENT_QUIET_HOURS",
         getattr(args, "quiet_hours", None),
@@ -436,6 +512,7 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
     return AgentConfig(
         openrouter=openrouter,
         classifier=classifier,
+        webhook=webhook,
         system_prompt=system_prompt,
         reply_instruction=reply_instruction,
         max_history_messages=max_history_messages,

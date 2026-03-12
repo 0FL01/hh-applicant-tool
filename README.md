@@ -810,6 +810,14 @@ hh-applicant-tool config -e
     "reply_delay_max_seconds": 60,
     "qa_series_delay_min_seconds": 30,
     "qa_series_delay_max_seconds": 120,
+    "webhook": {
+      "url": "https://example.com/hooks/hh-contact",
+      "timeout_seconds": 10,
+      "secret": "optional-shared-secret",
+      "secret_header": "X-Webhook-Secret",
+      "max_attempts": 3,
+      "retry_base_seconds": 30
+    },
     "system_prompt": "Ты соискатель на HeadHunter. Отвечай работодателю по-русски, вежливо и кратко.",
     "reply_instruction": "Верни JSON с полями action, reply_mode, reply_text, reply_messages, reason."
   }
@@ -821,6 +829,7 @@ hh-applicant-tool config -e
 - Берет только неотвеченный хвост сообщений работодателя после последнего сообщения кандидата.
 - Перед ответом выдерживает небольшое окно `incoming_collect_seconds`, чтобы склеить подряд идущие реплики вроде `Здравствуйте!` + следующий вопрос.
 - Для screening-ботов и anti-bot опросов может вернуть либо один цельный ответ, либо Q/A-серию из 2-3 коротких сообщений с jitter между частями.
+- Если классификатор видит recruiter contact offer с внешними контактами рекрутера, агент не отвечает в чат, а отправляет context pack на настроенный webhook.
 - В daemon-режиме работает batch-циклами: обработал накопившиеся чаты, затем ушел спать на случайный интервал в окне `sleep_min_minutes`-`sleep_max_minutes`.
 - По умолчанию ночью не отвечает: quiet window `23:00-08:00` по `Europe/Moscow`.
 - Отложенные части Q/A-серий сохраняются в SQLite и досылаются после рестарта процесса.

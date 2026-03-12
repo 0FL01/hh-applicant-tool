@@ -131,6 +131,24 @@ CREATE TABLE IF NOT EXISTS agent_outbox (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (negotiation_id, source_last_message_id, sequence_no)
 );
+/* ===================== agent_webhooks ===================== */
+CREATE TABLE IF NOT EXISTS agent_webhooks (
+    id TEXT PRIMARY KEY,
+    run_id TEXT,
+    negotiation_id INTEGER NOT NULL,
+    chat_id INTEGER,
+    source_last_message_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    target_url TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    send_after DATETIME,
+    sent_at DATETIME,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (negotiation_id, source_last_message_id, event_type)
+);
 /* ===================== settings ===================== */
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,

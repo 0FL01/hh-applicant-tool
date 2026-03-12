@@ -20,6 +20,12 @@ class HHGateway:
     def get_negotiations(self) -> Iterable[dict[str, Any]]:
         return self.tool.get_negotiations()
 
+    def get_vacancy(self, vacancy_id: str | int) -> dict[str, Any]:
+        return self.tool.api_client.get(f"/vacancies/{vacancy_id}")
+
+    def get_employer(self, employer_id: str | int) -> dict[str, Any]:
+        return self.tool.api_client.get(f"/employers/{employer_id}")
+
     def fetch_messages(self, negotiation_id: str | int) -> list[dict[str, Any]]:
         page = 0
         messages: list[dict[str, Any]] = []

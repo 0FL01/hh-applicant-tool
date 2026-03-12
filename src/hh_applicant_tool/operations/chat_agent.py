@@ -73,6 +73,13 @@ class Namespace(BaseNamespace):
     classifier_instruction: str | None
     classifier_reasoning: bool | None
     classifier_max_history_messages: int | None
+    webhook_enabled: bool | None
+    webhook_url: str | None
+    webhook_timeout_seconds: float | None
+    webhook_secret: str | None
+    webhook_secret_header: str | None
+    webhook_max_attempts: int | None
+    webhook_retry_base_seconds: float | None
     force: bool
     daemon: bool
     poll_interval: int
@@ -201,6 +208,39 @@ class Operation(BaseOperation):
             "--classifier-max-history-messages",
             type=int,
             help="Сколько последних сообщений отдавать классификатору",
+        )
+        parser.add_argument(
+            "--webhook-enabled",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="Включить webhook для recruiter_contact_offer кейсов",
+        )
+        parser.add_argument(
+            "--webhook-url",
+            help="URL внешнего webhook для recruiter_contact_offer",
+        )
+        parser.add_argument(
+            "--webhook-timeout-seconds",
+            type=float,
+            help="Timeout HTTP webhook в секундах",
+        )
+        parser.add_argument(
+            "--webhook-secret",
+            help="Секрет для подписи webhook в заголовке",
+        )
+        parser.add_argument(
+            "--webhook-secret-header",
+            help="Имя заголовка для секрета webhook",
+        )
+        parser.add_argument(
+            "--webhook-max-attempts",
+            type=int,
+            help="Максимум попыток доставки webhook",
+        )
+        parser.add_argument(
+            "--webhook-retry-base-seconds",
+            type=float,
+            help="Базовая задержка retry webhook",
         )
         parser.add_argument(
             "--force",

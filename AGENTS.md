@@ -37,6 +37,8 @@ The default branch is `main`.
   - `hh_llm_agent/service.py` - основной workflow автоответов
   - `hh_llm_agent/openrouter.py` - клиент OpenRouter с structured outputs и rate limiting
   - `hh_llm_agent/timing.py` - политика сна агента, quiet hours, jitter
+  - `hh_llm_agent/contact_extract.py` - экстрактор контактов из текста (email, telegram, phone, URL)
+  - `hh_llm_agent/webhook.py` - HTTP клиент для отправки webhook payload
 - `tests/` - тесты (pytest)
 - `docs/hhapi/openapi.yml` - архивная OpenAPI-спека hh API
 - `config/` - runtime-данные профилей (tokens/cookies/log/db), локальные и не для коммита секретов
@@ -77,9 +79,11 @@ The default branch is `main`.
   - `bot_actionable` — hh bot / AI assistant / robot recruiter задает вопросы → pass to reply LLM
   - `passive_update` — автоуведомления, thank-you без действия → skip
   - `marketing_broadcast` — брендовые портянки, соцсети, "узнайте нас лучше" → skip
+  - `recruiter_contact_offer` — рекрутер оставляет прямые контакты вне hh.ru (email, telegram, телефон) → webhook delivery, skip reply
   - `system_event` — join/leave ботов, системные события → skip
   - `irrelevant` — всё остальное → skip
-  - Если classifier сказал `skip`, решение сразу сохраняется в `agent_decisions`, reply LLM не вызывается.
+  - Если classifier сказал `skip` (включая `recruiter_contact_offer`), решение сразу сохраняется в `agent_decisions`, reply LLM не вызывается.
+  - Для `recruiter_contact_offer` агент извлекает контакты из сообщения через `contact_extract.py`, собирает context pack и отправляет на webhook вместо ответа в чат.
 - **Stage 2 — Reply LLM**: только для `human_actionable` / `bot_actionable`:
   - В модель передаются системный prompt, контекст по кандидату/резюме/вакансии/работодателю, последние сообщения и неотвеченный employer-tail.
   - LLM decision: OpenRouter вызывается со structured JSON schema output (`action/reply_mode/reply_text/reply_messages/reason`), reasoning и `response-healing`; локальный repair round-trip не используется.
@@ -94,6 +98,7 @@ The default branch is `main`.
   - `agent_runs` - статистика запуска агента
   - `agent_decisions` - решения модели, причины skip, reply text, raw_response, reasoning_details, plus classifier metadata (`classifier_category`, `classifier_reason`, `classifier_confidence`, `classifier_model`, `classifier_raw_response`)
   - `agent_outbox` - отложенные части Q/A-серий, их статус, время отправки и ошибки
+  - `agent_webhooks` - отложенные webhook payload для recruiter_contact_offer, их статус, попытки доставки и ошибки
   - `employers` - работодатели
   - `vacancies` - вакансии
   - `vacancy_contacts` - контакты работодателей
@@ -189,6 +194,13 @@ Chat agent пишет подробные INFO-логи на каждом эта�
   - `chat_agent.incoming_collect_seconds` (дефолт: 120)
   - `chat_agent.reply_delay_min_seconds` (дефолт: 15) / `reply_delay_max_seconds` (дефолт: 60)
   - `chat_agent.qa_series_delay_min_seconds` (дефолт: 30) / `qa_series_delay_max_seconds` (дефолт: 120)
+  - `chat_agent.webhook.url` - URL для webhook доставки recruiter_contact_offer
+  - `chat_agent.webhook.enabled` (дефолт: true если url задан)
+  - `chat_agent.webhook.timeout_seconds` (дефолт: 10)
+  - `chat_agent.webhook.secret` - секрет для подписи webhook
+  - `chat_agent.webhook.secret_header` (дефолт: `X-Webhook-Secret`)
+  - `chat_agent.webhook.max_attempts` (дефолт: 3)
+  - `chat_agent.webhook.retry_base_seconds` (дефолт: 30)
 - Environment variables from `.env.example`:
   - `OPENROUTER_API_KEY` (обязателен)
   - `OPENROUTER_BASE_URL`
@@ -218,6 +230,13 @@ Chat agent пишет подробные INFO-логи на каждом эта�
   - `CHAT_AGENT_OPENROUTER_REQUEST_INTERVAL_SECONDS` (дефолт: 0.35)
   - `CHAT_AGENT_OPENROUTER_MAX_RETRIES_ON_RATE_LIMIT` (дефолт: 2)
   - `CHAT_AGENT_OPENROUTER_RATE_LIMIT_RETRY_BASE_SECONDS` (дефолт: 2.0)
+  - `CHAT_AGENT_WEBHOOK_ENABLED` (дефолт: true если url задан)
+  - `CHAT_AGENT_WEBHOOK_URL` - URL для webhook
+  - `CHAT_AGENT_WEBHOOK_TIMEOUT_SECONDS` (дефолт: 10)
+  - `CHAT_AGENT_WEBHOOK_SECRET` - секрет для подписи
+  - `CHAT_AGENT_WEBHOOK_SECRET_HEADER` (дефолт: `X-Webhook-Secret`)
+  - `CHAT_AGENT_WEBHOOK_MAX_ATTEMPTS` (дефолт: 3)
+  - `CHAT_AGENT_WEBHOOK_RETRY_BASE_SECONDS` (дефолт: 30)
 
 ### Docker Notes
 - Основной app container и LLM agent container разные по назначению.
@@ -232,9 +251,10 @@ Chat agent пишет подробные INFO-логи на каждом эта�
 2. Перед добавлением новой команды проверь, нет ли близкой реализации в `src/hh_applicant_tool/operations/`.
 3. Если меняешь LLM-агент, смотри и CLI-адаптер `src/hh_applicant_tool/operations/chat_agent.py`, и root-level модуль `hh_llm_agent/`.
 4. Для изменений БД синхронизируй `storage/models`, `storage/repositories` и SQL-схему в `storage/queries/schema.sql`.
-5. Если меняешь audit/state логику агента, проверь согласованность таблиц `chat_messages`, `agent_runs`, `agent_decisions`, `agent_outbox`.
+5. Если меняешь audit/state логику агента, проверь согласованность таблиц `chat_messages`, `agent_runs`, `agent_decisions`, `agent_outbox`, `agent_webhooks`.
 6. При изменении логирования проверь тесты `tests/test_chat_agent_service.py` и `tests/test_chat_agent_operation.py` для подтверждения формата INFO-логов.
 7. Не коммить секреты и runtime-артефакты из `config/`, `.env`, токены, cookies и локальные DB/log файлы.
 8. Для проверки изменений запускай минимум `pytest`, а для CLI-поведения - целевую команду через `python -m hh_applicant_tool ...`.
 9. Для OpenRouter-логики отдельно полезно гонять `tests/test_openrouter_client.py`.
 10. **Tuning classifier prompts**: если агент пропускает шум (автоответы, брендовые рассылки, thank-you без действия), скорректируй `chat_agent.classifier.instruction` или `chat_agent.classifier.system_prompt`; classifier дешевый, поэтому можно агрессивно тюнить под реальные кейсы шума, не тратя токены на reply-модель.
+11. **Webhook для recruiter_contact_offer**: при добавлении новых полей в webhook payload, обнови `hh_llm_agent/service.py::_build_contact_webhook_payload`, `hh_llm_agent/webhook.py` и тесты. Контакты из сообщения извлекаются через `hh_llm_agent/contact_extract.py`.
