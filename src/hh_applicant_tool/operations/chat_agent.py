@@ -7,16 +7,46 @@ from datetime import timedelta
 from os import getenv
 from typing import TYPE_CHECKING
 
-from hh_llm_agent.config import load_agent_config
-from hh_llm_agent.service import ChatAgentService, RunStats
-from hh_llm_agent.timing import TimingPolicy
-
 from ..main import BaseNamespace, BaseOperation
 
 if TYPE_CHECKING:
+    from hh_llm_agent.service import RunStats
     from ..main import HHApplicantTool
 
 logger = logging.getLogger(__package__)
+
+
+def _missing_agent_dependency_error(ex: ModuleNotFoundError) -> RuntimeError:
+    return RuntimeError(
+        "Команда chat-agent недоступна в этом рантайме: отсутствует пакет "
+        "`hh_llm_agent`. Для `auth` и других основных команд используйте "
+        "обычный CLI-контейнер, а для LLM-агента - `docker compose -f "
+        "docker-compose.llm-agent.yml ...`."
+    )
+
+
+def load_agent_config(*args, **kwargs):
+    try:
+        from hh_llm_agent.config import load_agent_config as _load_agent_config
+    except ModuleNotFoundError as ex:
+        raise _missing_agent_dependency_error(ex) from ex
+    return _load_agent_config(*args, **kwargs)
+
+
+def ChatAgentService(*args, **kwargs):
+    try:
+        from hh_llm_agent.service import ChatAgentService as _ChatAgentService
+    except ModuleNotFoundError as ex:
+        raise _missing_agent_dependency_error(ex) from ex
+    return _ChatAgentService(*args, **kwargs)
+
+
+def TimingPolicy(*args, **kwargs):
+    try:
+        from hh_llm_agent.timing import TimingPolicy as _TimingPolicy
+    except ModuleNotFoundError as ex:
+        raise _missing_agent_dependency_error(ex) from ex
+    return _TimingPolicy(*args, **kwargs)
 
 
 class Namespace(BaseNamespace):
