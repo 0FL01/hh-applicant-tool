@@ -11,7 +11,11 @@ sys.modules.setdefault("openai", openai_module)
 from hh_applicant_tool.storage import StorageFacade
 from hh_llm_agent.config import AgentConfig, ClassifierConfig, OpenRouterConfig
 from hh_llm_agent.openrouter import LLMReply
-from hh_llm_agent.service import ChatAgentService
+from hh_llm_agent.service import (
+    CLASSIFIER_RESPONSE_SCHEMA,
+    REPLY_RESPONSE_SCHEMA,
+    ChatAgentService,
+)
 from hh_llm_agent.timing import AgentTimingConfig, TimingPolicy
 
 
@@ -48,11 +52,12 @@ REPLY_MODEL = "reply-model"
 CLASSIFIER_MODEL = "classifier-model"
 
 DEFAULT_REPLY = LLMReply(
-    content='{"action":"reply","reply_mode":"single","reply_text":"Здравствуйте!","reason":"need_reply"}',
+    content='{"action":"reply","reply_mode":"single","reply_text":"Здравствуйте!","reply_messages":[],"reason":"need_reply"}',
     parsed={
         "action": "reply",
         "reply_mode": "single",
         "reply_text": "Здравствуйте!",
+        "reply_messages": [],
         "reason": "need_reply",
     },
 )
@@ -224,6 +229,10 @@ def test_dry_run_does_not_persist_decisions_and_can_repeat(monkeypatch):
         )
         == 2
     )
+    classifier_call = FakeLLMClient.by_model(CLASSIFIER_MODEL)[0].calls[0][1]
+    reply_call = FakeLLMClient.by_model(REPLY_MODEL)[0].calls[0][1]
+    assert classifier_call["schema"].name == CLASSIFIER_RESPONSE_SCHEMA.name
+    assert reply_call["schema"].name == REPLY_RESPONSE_SCHEMA.name
 
 
 def test_existing_dry_run_decision_does_not_block_processing(monkeypatch):
@@ -330,10 +339,11 @@ def test_classifier_skip_prevents_reply_generation(monkeypatch):
 def test_qa_series_is_queued_and_sent_in_order(monkeypatch):
     FakeLLMClient.reset()
     FakeLLMClient.replies[REPLY_MODEL] = LLMReply(
-        content='{"action":"reply","reply_mode":"qa_series","reply_messages":["msg1","msg2"],"reason":"screening"}',
+        content='{"action":"reply","reply_mode":"qa_series","reply_text":"","reply_messages":["msg1","msg2"],"reason":"screening"}',
         parsed={
             "action": "reply",
             "reply_mode": "qa_series",
+            "reply_text": "",
             "reply_messages": ["msg1", "msg2"],
             "reason": "screening",
         },
@@ -358,11 +368,12 @@ def test_qa_series_is_queued_and_sent_in_order(monkeypatch):
 def test_recent_messages_are_collected_before_llm_call(monkeypatch):
     FakeLLMClient.reset()
     FakeLLMClient.replies[REPLY_MODEL] = LLMReply(
-        content='{"action":"reply","reply_mode":"single","reply_text":"combined","reason":"need_reply"}',
+        content='{"action":"reply","reply_mode":"single","reply_text":"combined","reply_messages":[],"reason":"need_reply"}',
         parsed={
             "action": "reply",
             "reply_mode": "single",
             "reply_text": "combined",
+            "reply_messages": [],
             "reason": "need_reply",
         },
     )

@@ -17,26 +17,26 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 DEFAULT_CLASSIFIER_SYSTEM_PROMPT = (
     "Ты классификатор входящих сообщений в чатах hh.ru. Определи, нужно ли "
-    "кандидату отвечать прямо сейчас. Отвечай только JSON без пояснений."
+    "кандидату отвечать прямо сейчас."
 )
 DEFAULT_REPLY_INSTRUCTION = (
-    "Проанализируй переписку и верни JSON с полями action, reply_mode, "
-    "reply_text, reply_messages, reason. action может быть только reply или "
-    "skip. reply_mode может быть single или qa_series. Если нужен один цельный "
-    "ответ работодателю, выбери single и заполни reply_text. Если во входящем "
-    "пакете несколько screening-вопросов и естественнее ответить короткой "
-    "серией, выбери qa_series и верни 2-3 коротких сообщения в reply_messages. "
-    "Если отвечать не нужно, выбери skip и кратко объясни why в reason."
+    "Проанализируй переписку и реши, нужно ли отвечать работодателю сейчас. "
+    "action может быть только reply или skip. reply_mode может быть single "
+    "или qa_series. Если нужен один цельный ответ работодателю, выбери single "
+    "и сформулируй reply_text. Если во входящем пакете несколько screening-"
+    "вопросов и естественнее ответить короткой серией, выбери qa_series и "
+    "сформулируй 2-3 коротких сообщения. Если отвечать не нужно, выбери skip "
+    "и кратко объясни причину в reason."
 )
 DEFAULT_CLASSIFIER_INSTRUCTION = (
-    "Проанализируй переписку и верни JSON с полями action, category, reason, "
-    "confidence. action может быть только reply или skip. category может быть "
-    "только human_actionable, bot_actionable, passive_update, "
-    "marketing_broadcast, system_event или irrelevant. reply ставь только если "
-    "в последнем неотвеченном пакете есть прямой вопрос, screening, просьба "
-    "подтвердить интерес, сообщить данные или выполнить следующий шаг. skip "
-    "ставь для автоуведомлений, брендовых рассылок, thank-you сообщений без "
-    "действия, системных событий и прочего шума. confidence - число от 0 до 1."
+    "Проанализируй переписку. action может быть только reply или skip. "
+    "category может быть только human_actionable, bot_actionable, "
+    "passive_update, marketing_broadcast, system_event или irrelevant. "
+    "reply ставь только если в последнем неотвеченном пакете есть прямой "
+    "вопрос, screening, просьба подтвердить интерес, сообщить данные или "
+    "выполнить следующий шаг. skip ставь для автоуведомлений, брендовых "
+    "рассылок, thank-you сообщений без действия, системных событий и прочего "
+    "шума. confidence - число от 0 до 1."
 )
 
 

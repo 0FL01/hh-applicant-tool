@@ -41,7 +41,7 @@ The default branch is `main`.
 - **StorageFacade (`storage/facade.py`)**: единая точка доступа к persistence-слою SQLite, включая репозитории агента.
 - **Chat Agent Operation (`src/hh_applicant_tool/operations/chat_agent.py`)**: CLI-адаптер для `hh_llm_agent`, поддерживает one-shot и daemon-loop режимы. Отвечает за daemon циклы, quiet hours логирование и cycle summary.
 - **ChatAgentService (`hh_llm_agent/service.py`)**: основной workflow автоответов: batch-run, quiet hours, debounce свежих сообщений работодателя, single-reply/QA-series планирование, outbox и audit в SQLite. Логирует run lifecycle, negotiation start/outcome и LLM решения на INFO.
-- **OpenRouterChatClient (`hh_llm_agent/openrouter.py`)**: клиент OpenRouter через SDK `openai` с reasoning и JSON repair.
+- **OpenRouterChatClient (`hh_llm_agent/openrouter.py`)**: клиент OpenRouter через SDK `openai` со structured outputs (`response_format=json_schema`), `require_parameters=true`, reasoning и `response-healing` plugin.
 - **TimingPolicy (`hh_llm_agent/timing.py`)**: политика сна агента, quiet hours по таймзоне, jitter между циклами и сообщениями.
 
 ## Architecture & Rules
@@ -71,11 +71,11 @@ The default branch is `main`.
   - `irrelevant` — всё остальное → skip
   - Если classifier сказал `skip`, решение сразу сохраняется в `agent_decisions`, reply LLM не вызывается.
 - **Stage 2 — Reply LLM**: только для `human_actionable` / `bot_actionable`:
-  - В модель передаются системный prompt, контекст по кандидату/резюме/вакансии/работодателю, последние сообщения, неотвеченный employer-tail и инструкция вернуть JSON `action/reply_mode/reply_text/reply_messages/reason`.
-  - LLM decision: OpenRouter вызывается с reasoning; если модель вернула невалидный JSON, выполняется repair-запрос с сохранением `reasoning_details`.
+  - В модель передаются системный prompt, контекст по кандидату/резюме/вакансии/работодателю, последние сообщения и неотвеченный employer-tail.
+  - LLM decision: OpenRouter вызывается со structured JSON schema output (`action/reply_mode/reply_text/reply_messages/reason`), reasoning и `response-healing`; локальный repair round-trip не используется.
 - Выполнение решения:
   - `skip` -> сохраняется решение в `agent_decisions` (classifier или reply-модель)
-  - `reply` + `dry_run` -> печатается предполагаемый ответ без отправки
+  - `reply` + `dry_run` -> classifier/reply LLM все равно выполняются, но ответ только печатается без отправки и без записи decision в БД
   - `reply(single)` -> один ответ отправляется через API `/negotiations/{nid}/messages`
   - `reply(qa_series)` -> 2-3 коротких сообщения кладутся в `agent_outbox` и отправляются с jitter между частями
 - Audit/persistence:

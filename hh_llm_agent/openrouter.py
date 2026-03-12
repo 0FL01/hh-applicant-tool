@@ -14,31 +14,22 @@ class OpenRouterError(Exception):
 
 
 @dataclass(frozen=True)
+class StructuredOutputSchema:
+    name: str
+    schema: dict[str, Any]
+    strict: bool = True
+
+
+@dataclass(frozen=True)
 class LLMReply:
     content: str
     reasoning_details: list[dict[str, Any]] | None = None
     parsed: dict[str, Any] | None = None
 
 
-def extract_json_object(content: str) -> dict[str, Any]:
-    content = content.strip()
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        pass
-
-    start = content.find("{")
-    end = content.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise OpenRouterError("Model did not return JSON.")
-
-    try:
-        return json.loads(content[start : end + 1])
-    except json.JSONDecodeError as ex:
-        raise OpenRouterError("Model returned invalid JSON.") from ex
-
-
 class OpenRouterChatClient:
+    RESPONSE_HEALING_PLUGIN_ID = "response-healing"
+
     def __init__(
         self,
         config: OpenRouterConfig,
@@ -82,17 +73,41 @@ class OpenRouterChatClient:
                 dumped.append({"value": str(item)})
         return dumped
 
-    def _create(self, messages: list[dict[str, Any]]) -> LLMReply:
+    def _response_format(
+        self,
+        schema: StructuredOutputSchema,
+    ) -> dict[str, Any]:
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema.name,
+                "strict": schema.strict,
+                "schema": schema.schema,
+            },
+        }
+
+    def _create(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        schema: StructuredOutputSchema | None = None,
+    ) -> LLMReply:
+        extra_body: dict[str, Any] = {
+            "reasoning": {"enabled": self.config.reasoning_enabled}
+        }
+        request: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "max_completion_tokens": self.config.max_completion_tokens,
+            "extra_body": extra_body,
+        }
+        if schema is not None:
+            request["response_format"] = self._response_format(schema)
+            extra_body["provider"] = {"require_parameters": True}
+            extra_body["plugins"] = [{"id": self.RESPONSE_HEALING_PLUGIN_ID}]
         try:
-            response = self.client.chat.completions.create(
-                model=self.config.model,
-                messages=messages,
-                temperature=self.config.temperature,
-                max_completion_tokens=self.config.max_completion_tokens,
-                extra_body={
-                    "reasoning": {"enabled": self.config.reasoning_enabled}
-                },
-            )
+            response = self.client.chat.completions.create(**request)
         except Exception as ex:
             raise OpenRouterError(f"OpenRouter request failed: {ex}") from ex
         message = response.choices[0].message
@@ -107,40 +122,19 @@ class OpenRouterChatClient:
         self,
         messages: list[dict[str, Any]],
         *,
-        repair_prompt: str | None = None,
+        schema: StructuredOutputSchema,
     ) -> LLMReply:
-        reply = self._create(messages)
+        reply = self._create(messages, schema=schema)
         try:
-            return LLMReply(
-                content=reply.content,
-                reasoning_details=reply.reasoning_details,
-                parsed=extract_json_object(reply.content),
-            )
-        except OpenRouterError:
-            repair_messages = list(messages)
-            assistant_message: dict[str, Any] = {
-                "role": "assistant",
-                "content": reply.content,
-            }
-            if reply.reasoning_details:
-                assistant_message["reasoning_details"] = reply.reasoning_details
-            repair_messages.append(assistant_message)
-            repair_messages.append(
-                {
-                    "role": "user",
-                    "content": repair_prompt
-                    or (
-                        "Верни тот же ответ строго как JSON-объект без ``` и "
-                        "без пояснений. Формат: "
-                        '{"action": "reply"|"skip", "reply_mode": '
-                        '"single"|"qa_series", "reply_text": "...", '
-                        '"reply_messages": ["..."], "reason": "..."}.'
-                    ),
-                }
-            )
-            repaired = self._create(repair_messages)
-            return LLMReply(
-                content=repaired.content,
-                reasoning_details=repaired.reasoning_details,
-                parsed=extract_json_object(repaired.content),
-            )
+            parsed = json.loads(reply.content)
+        except json.JSONDecodeError as ex:
+            raise OpenRouterError(
+                "Model returned invalid structured JSON."
+            ) from ex
+        if not isinstance(parsed, dict):
+            raise OpenRouterError("Model returned non-object structured JSON.")
+        return LLMReply(
+            content=reply.content,
+            reasoning_details=reply.reasoning_details,
+            parsed=parsed,
+        )

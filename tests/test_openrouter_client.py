@@ -1,4 +1,32 @@
-from hh_llm_agent.openrouter import OpenRouterChatClient
+import sys
+import types
+
+import pytest
+
+openai_module = types.ModuleType("openai")
+openai_module.OpenAI = object
+sys.modules.setdefault("openai", openai_module)
+
+from hh_llm_agent.openrouter import (
+    OpenRouterChatClient,
+    OpenRouterError,
+    StructuredOutputSchema,
+)
+
+
+TEST_SCHEMA = StructuredOutputSchema(
+    name="reply_decision",
+    schema={
+        "type": "object",
+        "properties": {
+            "action": {"type": "string"},
+            "reply_text": {"type": "string"},
+            "reason": {"type": "string"},
+        },
+        "required": ["action", "reply_text", "reason"],
+        "additionalProperties": False,
+    },
+)
 
 
 class FakeMessage:
@@ -59,23 +87,33 @@ def test_complete_json_parses_first_try():
         client=client,
     )
 
-    result = chat.complete_json([{"role": "user", "content": "hi"}])
+    result = chat.complete_json(
+        [{"role": "user", "content": "hi"}],
+        schema=TEST_SCHEMA,
+    )
 
     assert result.parsed["action"] == "reply"
+    assert client.chat.completions.calls[0]["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "reply_decision",
+            "strict": True,
+            "schema": TEST_SCHEMA.schema,
+        },
+    }
     assert client.chat.completions.calls[0]["extra_body"] == {
-        "reasoning": {"enabled": True}
+        "reasoning": {"enabled": True},
+        "provider": {"require_parameters": True},
+        "plugins": [{"id": "response-healing"}],
     }
 
 
-def test_complete_json_repairs_invalid_json_and_preserves_reasoning():
+def test_complete_json_raises_for_invalid_structured_json():
     client = FakeClient(
         [
             FakeResponse(
                 "reply: sure",
                 reasoning_details=[{"type": "reasoning.text", "text": "draft"}],
-            ),
-            FakeResponse(
-                '{"action":"skip","reply_text":"","reason":"nothing_to_add"}'
             ),
         ]
     )
@@ -97,10 +135,10 @@ def test_complete_json_repairs_invalid_json_and_preserves_reasoning():
         client=client,
     )
 
-    result = chat.complete_json([{"role": "user", "content": "hi"}])
+    with pytest.raises(OpenRouterError, match="invalid structured JSON"):
+        chat.complete_json(
+            [{"role": "user", "content": "hi"}],
+            schema=TEST_SCHEMA,
+        )
 
-    assert result.parsed["action"] == "skip"
-    repair_messages = client.chat.completions.calls[1]["messages"]
-    assert repair_messages[-2]["reasoning_details"] == [
-        {"type": "reasoning.text", "text": "draft"}
-    ]
+    assert len(client.chat.completions.calls) == 1

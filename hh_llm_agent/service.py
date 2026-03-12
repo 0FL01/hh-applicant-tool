@@ -11,26 +11,96 @@ from hh_applicant_tool.utils.date import parse_api_datetime, try_parse_datetime
 
 from .config import AgentConfig, load_agent_config
 from .gateway import HHGateway
-from .openrouter import LLMReply, OpenRouterChatClient, OpenRouterError
+from .openrouter import (
+    LLMReply,
+    OpenRouterChatClient,
+    OpenRouterError,
+    StructuredOutputSchema,
+)
 from .timing import TimingPolicy
 
 logger = logging.getLogger(__package__)
 
-CLASSIFIER_CATEGORIES = {
+CLASSIFIER_CATEGORY_VALUES = (
     "human_actionable",
     "bot_actionable",
     "passive_update",
     "marketing_broadcast",
     "system_event",
     "irrelevant",
-}
+)
+CLASSIFIER_CATEGORIES = set(CLASSIFIER_CATEGORY_VALUES)
 
-CLASSIFIER_JSON_REPAIR_PROMPT = (
-    "Верни тот же ответ строго как JSON-объект без ``` и без пояснений. "
-    'Формат: {"action": "reply"|"skip", "category": '
-    '"human_actionable"|"bot_actionable"|"passive_update"|'
-    '"marketing_broadcast"|"system_event"|"irrelevant", '
-    '"reason": "...", "confidence": 0.0}.'
+CLASSIFIER_RESPONSE_SCHEMA = StructuredOutputSchema(
+    name="chat_classifier_decision",
+    schema={
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["reply", "skip"],
+                "description": "Whether the candidate should reply now.",
+            },
+            "category": {
+                "type": "string",
+                "enum": list(CLASSIFIER_CATEGORY_VALUES),
+                "description": "Classifier category for the employer tail.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Short explanation for the decision.",
+            },
+            "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Confidence score from 0 to 1.",
+            },
+        },
+        "required": ["action", "category", "reason", "confidence"],
+        "additionalProperties": False,
+    },
+)
+
+REPLY_RESPONSE_SCHEMA = StructuredOutputSchema(
+    name="chat_reply_decision",
+    schema={
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["reply", "skip"],
+                "description": "Whether to reply to the employer now.",
+            },
+            "reply_mode": {
+                "type": "string",
+                "enum": ["single", "qa_series"],
+                "description": "Single message or short Q/A series.",
+            },
+            "reply_text": {
+                "type": "string",
+                "description": "Main reply text for single-mode replies.",
+            },
+            "reply_messages": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 3,
+                "description": "Ordered short messages for qa_series mode.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Short explanation for the decision.",
+            },
+        },
+        "required": [
+            "action",
+            "reply_mode",
+            "reply_text",
+            "reply_messages",
+            "reason",
+        ],
+        "additionalProperties": False,
+    },
 )
 
 
@@ -285,7 +355,7 @@ class ChatAgentService:
                     messages=messages,
                     unanswered_messages=employer_tail,
                 ),
-                repair_prompt=CLASSIFIER_JSON_REPAIR_PROMPT,
+                schema=CLASSIFIER_RESPONSE_SCHEMA,
             )
             classification = self._normalize_classification(classifier_reply)
             logger.info(
@@ -333,7 +403,8 @@ class ChatAgentService:
                 me=me,
                 messages=messages,
                 unanswered_messages=employer_tail,
-            )
+            ),
+            schema=REPLY_RESPONSE_SCHEMA,
         )
         decision = self._normalize_decision(reply)
         logger.info(
