@@ -4,11 +4,14 @@ import types
 from datetime import datetime
 from types import SimpleNamespace
 
+from requests import Request, Response
+
 openai_module = types.ModuleType("openai")
 openai_module.OpenAI = object
 sys.modules.setdefault("openai", openai_module)
 
 from hh_applicant_tool.storage import StorageFacade
+from hh_applicant_tool.api.errors import Forbidden
 from hh_llm_agent.config import AgentConfig, ClassifierConfig, OpenRouterConfig
 from hh_llm_agent.openrouter import LLMReply
 from hh_llm_agent.service import (
@@ -99,6 +102,23 @@ class FakeGateway:
 
     def send_message(self, negotiation_id, message, delay=None):
         self.sent_messages.append((negotiation_id, message, delay))
+
+
+class FailingGateway(FakeGateway):
+    def send_message(self, negotiation_id, message, delay=None):
+        response = Response()
+        response.status_code = 403
+        response._content = (
+            b'{"description":"forbidden","errors":[{"type":"forbidden"}]}'
+        )
+        response.request = Request(
+            "POST",
+            f"https://api.hh.ru/negotiations/{negotiation_id}/messages",
+        ).prepare()
+        raise Forbidden(
+            response,
+            {"description": "forbidden", "errors": [{"type": "forbidden"}]},
+        )
 
 
 class FakeLLMClient:
@@ -308,6 +328,58 @@ def test_real_decision_still_blocks_reprocessing(monkeypatch):
     assert stats.skipped == 1
     assert len(FakeLLMClient.by_model(REPLY_MODEL)[0].calls) == 0
     assert len(FakeLLMClient.by_model(CLASSIFIER_MODEL)[0].calls) == 0
+
+
+def test_dry_run_skips_pending_outbox_flush(monkeypatch):
+    FakeLLMClient.reset()
+    tool = make_tool()
+    tool.storage.agent_outbox.save(
+        {
+            "id": "outbox-1",
+            "run_id": "old-run",
+            "negotiation_id": NEGOTIATION["id"],
+            "chat_id": NEGOTIATION["chat_id"],
+            "source_last_message_id": EMPLOYER_MESSAGE["id"],
+            "sequence_no": 1,
+            "message_text": "old message",
+            "status": "pending",
+        }
+    )
+    gateway = FakeGateway(responses=[[]])
+
+    service = make_service(monkeypatch, tool, gateway, dry_run=True)
+    stats = service.run()
+
+    assert stats.skipped == 1
+    assert gateway.sent_messages == []
+    outbox_item = next(tool.storage.agent_outbox.find())
+    assert outbox_item.status == "pending"
+
+
+def test_failed_pending_outbox_does_not_block_run(monkeypatch):
+    FakeLLMClient.reset()
+    tool = make_tool()
+    tool.storage.agent_outbox.save(
+        {
+            "id": "outbox-1",
+            "run_id": "old-run",
+            "negotiation_id": NEGOTIATION["id"],
+            "chat_id": NEGOTIATION["chat_id"],
+            "source_last_message_id": EMPLOYER_MESSAGE["id"],
+            "sequence_no": 1,
+            "message_text": "old message",
+            "status": "pending",
+        }
+    )
+    gateway = FailingGateway(responses=[[]])
+
+    service = make_service(monkeypatch, tool, gateway, dry_run=False)
+    stats = service.run()
+
+    assert stats.skipped == 1
+    outbox_item = next(tool.storage.agent_outbox.find())
+    assert outbox_item.status == "failed"
+    assert outbox_item.last_error == "forbidden"
 
 
 def test_classifier_skip_prevents_reply_generation(monkeypatch):

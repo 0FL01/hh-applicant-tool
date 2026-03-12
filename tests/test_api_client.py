@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from requests import Request
 
+from hh_applicant_tool.api import errors
 from hh_applicant_tool.api.client import ApiClient
 from hh_applicant_tool.main import HHApplicantTool
 
@@ -87,7 +88,7 @@ def test_api_client_generates_and_persists_profile_user_agent(monkeypatch):
     assert config.saved == [{"user_agent": "stable-user-agent"}]
 
 
-def test_api_client_refreshes_after_forbidden_before_local_expiry(monkeypatch):
+def test_api_client_refreshes_when_token_is_expired(monkeypatch):
     session = FakeSession(
         responses=[
             FakeResponse(
@@ -103,7 +104,7 @@ def test_api_client_refreshes_after_forbidden_before_local_expiry(monkeypatch):
     client = ApiClient(
         access_token="USER_old",
         refresh_token="refresh-token",
-        access_expires_at=int(time.time()) + 3600,
+        access_expires_at=int(time.time()) - 1,
         session=session,
         delay=0,
     )
@@ -125,3 +126,33 @@ def test_api_client_refreshes_after_forbidden_before_local_expiry(monkeypatch):
     assert len(session.calls) == 2
     assert session.calls[0][2]["headers"]["authorization"] == "Bearer USER_old"
     assert session.calls[1][2]["headers"]["authorization"] == "Bearer USER_new"
+
+
+def test_api_client_does_not_refresh_before_local_expiry():
+    session = FakeSession(
+        responses=[
+            FakeResponse(
+                403,
+                {
+                    "description": "Forbidden",
+                    "errors": [{"type": "forbidden"}],
+                },
+            )
+        ]
+    )
+    client = ApiClient(
+        access_token="USER_old",
+        refresh_token="refresh-token",
+        access_expires_at=int(time.time()) + 3600,
+        session=session,
+        delay=0,
+    )
+
+    try:
+        client.get("/me")
+    except errors.Forbidden:
+        pass
+    else:
+        raise AssertionError("Expected Forbidden to be raised")
+
+    assert len(session.calls) == 1

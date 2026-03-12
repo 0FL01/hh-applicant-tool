@@ -188,7 +188,15 @@ class ChatAgentService:
                 if self.classifier_llm
                 else "disabled",
             )
-            self._flush_pending_outbox()
+            if self.config.dry_run:
+                pending = self.tool.storage.agent_outbox.list_pending()
+                if pending:
+                    logger.info(
+                        "Dry-run mode skips pending outbox flush: pending=%s",
+                        len(pending),
+                    )
+            else:
+                self._flush_pending_outbox()
             me = self.gateway.get_user()
             resumes = self._get_resume_map()
             blacklisted = (
@@ -906,7 +914,13 @@ class ChatAgentService:
                 )
             except ApiError as ex:
                 self.tool.storage.agent_outbox.mark_failed(item.id, str(ex))
-                raise
+                logger.warning(
+                    "Outbox flush failed for item %s negotiation=%s: %s",
+                    item.id,
+                    item.negotiation_id,
+                    ex,
+                )
+                continue
             self.tool.storage.agent_outbox.mark_sent(item.id, self.timing.now())
 
     def _wait_until(

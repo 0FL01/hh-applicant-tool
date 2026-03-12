@@ -76,7 +76,7 @@ class AgentOutboxRepository(BaseRepository):
 
     def mark_failed(self, outbox_id: str, error: str) -> None:
         self.conn.execute(
-            f"UPDATE {self.table_name} SET last_error = ? WHERE id = ?;",
-            (error, outbox_id),
+            f"UPDATE {self.table_name} SET status = ?, last_error = ? WHERE id = ?;",
+            ("failed", error, outbox_id),
         )
         self.maybe_commit()
