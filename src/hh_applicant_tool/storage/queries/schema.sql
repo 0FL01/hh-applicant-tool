@@ -107,6 +107,11 @@ CREATE TABLE IF NOT EXISTS agent_decisions (
     model TEXT,
     raw_response TEXT,
     reasoning_details TEXT NOT NULL DEFAULT '[]',
+    classifier_category TEXT,
+    classifier_reason TEXT,
+    classifier_confidence REAL,
+    classifier_model TEXT,
+    classifier_raw_response TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (negotiation_id, last_message_id)
 );

@@ -16,6 +16,23 @@ from .timing import TimingPolicy
 
 logger = logging.getLogger(__package__)
 
+CLASSIFIER_CATEGORIES = {
+    "human_actionable",
+    "bot_actionable",
+    "passive_update",
+    "marketing_broadcast",
+    "system_event",
+    "irrelevant",
+}
+
+CLASSIFIER_JSON_REPAIR_PROMPT = (
+    "Верни тот же ответ строго как JSON-объект без ``` и без пояснений. "
+    'Формат: {"action": "reply"|"skip", "category": '
+    '"human_actionable"|"bot_actionable"|"passive_update"|'
+    '"marketing_broadcast"|"system_event"|"irrelevant", '
+    '"reason": "...", "confidence": 0.0}.'
+)
+
 
 @dataclass
 class RunStats:
@@ -32,6 +49,11 @@ class ChatAgentService:
         self.config: AgentConfig = load_agent_config(tool, args)
         self.gateway = HHGateway(tool)
         self.llm = OpenRouterChatClient(self.config.openrouter)
+        self.classifier_llm = (
+            OpenRouterChatClient(self.config.classifier.openrouter)
+            if self.config.classifier and self.config.classifier.enabled
+            else None
+        )
         self.stats = RunStats()
         self.run_id = uuid4().hex
         self.timing = TimingPolicy(self.config.timing)
@@ -84,7 +106,7 @@ class ChatAgentService:
         self._save_run(status="running")
         try:
             logger.info(
-                "Chat agent run started: run_id=%s dry_run=%s limit=%s resume_id=%s only_invitations=%s skip_blacklisted=%s force=%s",
+                "Chat agent run started: run_id=%s dry_run=%s limit=%s resume_id=%s only_invitations=%s skip_blacklisted=%s force=%s classifier=%s",
                 self.run_id,
                 self.config.dry_run,
                 self.config.limit,
@@ -92,6 +114,9 @@ class ChatAgentService:
                 self.config.only_invitations,
                 self.config.skip_blacklisted,
                 self.config.force,
+                self.config.classifier.openrouter.model
+                if self.classifier_llm
+                else "disabled",
             )
             self._flush_pending_outbox()
             me = self.gateway.get_user()
@@ -249,6 +274,58 @@ class ChatAgentService:
             )
             return
 
+        classification = None
+        classifier_reply = None
+        if self.classifier_llm is not None:
+            classifier_reply = self.classifier_llm.complete_json(
+                self._build_classifier_messages(
+                    negotiation=negotiation,
+                    resume=resume,
+                    me=me,
+                    messages=messages,
+                    unanswered_messages=employer_tail,
+                ),
+                repair_prompt=CLASSIFIER_JSON_REPAIR_PROMPT,
+            )
+            classification = self._normalize_classification(classifier_reply)
+            logger.info(
+                "Negotiation %s classifier: action=%s category=%s confidence=%.2f reason=%r",
+                negotiation["id"],
+                classification["action"],
+                classification["category"],
+                classification["confidence"],
+                classification["reason"],
+            )
+            if classification["action"] != "reply":
+                skip_reason = str(
+                    classification["reason"] or classification["category"]
+                )
+                self._save_decision(
+                    negotiation=negotiation,
+                    last_message=last_message,
+                    action="skip",
+                    reason=skip_reason,
+                    reply_text="",
+                    raw_response="",
+                    reasoning_details=[],
+                    classifier_category=str(classification["category"]),
+                    classifier_reason=skip_reason,
+                    classifier_confidence=float(classification["confidence"]),
+                    classifier_raw_response=classifier_reply.content,
+                )
+                self.stats.skipped += 1
+                self._log_negotiation_outcome(
+                    negotiation,
+                    "skipped",
+                    reason=skip_reason,
+                    classifier_category=classification["category"],
+                )
+                print(
+                    "⏭️ Пропущен чат "
+                    f"{negotiation['id']}: {classification['category']}"
+                )
+                return
+
         reply = self.llm.complete_json(
             self._build_llm_messages(
                 negotiation=negotiation,
@@ -277,6 +354,22 @@ class ChatAgentService:
                 reply_text=decision["reply_text"],
                 raw_response=reply.content,
                 reasoning_details=reply.reasoning_details,
+                classifier_category=(
+                    str(classification["category"]) if classification else None
+                ),
+                classifier_reason=(
+                    str(classification["reason"] or "")
+                    if classification
+                    else None
+                ),
+                classifier_confidence=(
+                    float(classification["confidence"])
+                    if classification
+                    else None
+                ),
+                classifier_raw_response=(
+                    classifier_reply.content if classifier_reply else None
+                ),
             )
             self.stats.skipped += 1
             self._log_negotiation_outcome(
@@ -310,6 +403,18 @@ class ChatAgentService:
             reply_text=self._render_reply_text(decision),
             raw_response=reply.content,
             reasoning_details=reply.reasoning_details,
+            classifier_category=(
+                str(classification["category"]) if classification else None
+            ),
+            classifier_reason=(
+                str(classification["reason"] or "") if classification else None
+            ),
+            classifier_confidence=(
+                float(classification["confidence"]) if classification else None
+            ),
+            classifier_raw_response=(
+                classifier_reply.content if classifier_reply else None
+            ),
         )
         self._enqueue_reply_messages(
             negotiation=negotiation,
@@ -328,6 +433,55 @@ class ChatAgentService:
             source_last_message_id=str(last_message["id"]),
             vacancy_url=(negotiation.get("vacancy") or {}).get("alternate_url"),
         )
+
+    def _build_classifier_messages(
+        self,
+        negotiation: dict,
+        resume: dict,
+        me: dict,
+        messages: list[dict],
+        unanswered_messages: list[dict],
+    ) -> list[dict[str, str]]:
+        vacancy = negotiation.get("vacancy") or {}
+        employer = vacancy.get("employer") or {}
+        history_limit = (
+            self.config.classifier.max_history_messages
+            if self.config.classifier is not None
+            else 8
+        )
+        history = messages[-history_limit:]
+        history_block = "\n".join(
+            f"[{message['author']['participant_type']}] {(message.get('text') or '').strip()}"
+            for message in history
+        )
+        unanswered_block = "\n".join(
+            f"{idx}. {(message.get('text') or '').strip()}"
+            for idx, message in enumerate(unanswered_messages, 1)
+        )
+
+        classifier_messages: list[dict[str, str]] = [
+            {
+                "role": "system",
+                "content": self.config.classifier.system_prompt,
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Контекст:\n"
+                    f"- Кандидат: {(me.get('first_name') or '').strip()} {(me.get('last_name') or '').strip()}\n"
+                    f"- Резюме: {resume.get('title') or ''}\n"
+                    f"- Вакансия: {vacancy.get('name') or ''}\n"
+                    f"- Работодатель: {employer.get('name') or ''}\n"
+                    f"- Статус отклика: {negotiation['state']['id']}\n"
+                    f"- Screening mode: {'yes' if self._is_screening_sequence(unanswered_messages) else 'no'}.\n\n"
+                    f"Последние сообщения:\n{history_block or '-'}\n\n"
+                    f"Последний неотвеченный пакет работодателя:\n{unanswered_block}\n\n"
+                    f"{self.config.classifier.instruction}"
+                ).strip(),
+            },
+        ]
+
+        return classifier_messages
 
     def _build_llm_messages(
         self,
@@ -391,6 +545,43 @@ class ChatAgentService:
             }
         )
         return llm_messages
+
+    def _normalize_classification(self, reply: LLMReply) -> dict[str, object]:
+        payload = reply.parsed or {}
+        action = str(payload.get("action") or "skip").strip().lower()
+        if action not in {"reply", "skip"}:
+            action = "skip"
+
+        category = str(payload.get("category") or "irrelevant").strip().lower()
+        if category not in CLASSIFIER_CATEGORIES:
+            category = "human_actionable" if action == "reply" else "irrelevant"
+
+        reason = str(payload.get("reason") or "").strip()
+
+        try:
+            confidence = float(payload.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = max(0.0, min(confidence, 1.0))
+
+        if action == "reply" and category not in {
+            "human_actionable",
+            "bot_actionable",
+        }:
+            category = "human_actionable"
+
+        if action == "skip" and category in {
+            "human_actionable",
+            "bot_actionable",
+        }:
+            category = "irrelevant"
+
+        return {
+            "action": action,
+            "category": category,
+            "reason": reason,
+            "confidence": confidence,
+        }
 
     def _normalize_decision(self, reply: LLMReply) -> dict[str, object]:
         payload = reply.parsed or {}
@@ -681,6 +872,10 @@ class ChatAgentService:
         reply_text: str,
         raw_response: str,
         reasoning_details,
+        classifier_category: str | None = None,
+        classifier_reason: str | None = None,
+        classifier_confidence: float | None = None,
+        classifier_raw_response: str | None = None,
     ) -> None:
         if self.config.dry_run:
             return
@@ -702,6 +897,16 @@ class ChatAgentService:
                 "model": self.config.openrouter.model,
                 "raw_response": raw_response,
                 "reasoning_details": reasoning_details or [],
+                "classifier_category": classifier_category,
+                "classifier_reason": classifier_reason,
+                "classifier_confidence": classifier_confidence,
+                "classifier_model": (
+                    self.config.classifier.openrouter.model
+                    if self.classifier_llm is not None
+                    and classifier_raw_response is not None
+                    else None
+                ),
+                "classifier_raw_response": classifier_raw_response,
             }
         )
 

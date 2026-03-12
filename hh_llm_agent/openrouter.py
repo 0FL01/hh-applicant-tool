@@ -103,7 +103,12 @@ class OpenRouterChatClient:
             ),
         )
 
-    def complete_json(self, messages: list[dict[str, Any]]) -> LLMReply:
+    def complete_json(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        repair_prompt: str | None = None,
+    ) -> LLMReply:
         reply = self._create(messages)
         try:
             return LLMReply(
@@ -123,7 +128,8 @@ class OpenRouterChatClient:
             repair_messages.append(
                 {
                     "role": "user",
-                    "content": (
+                    "content": repair_prompt
+                    or (
                         "Верни тот же ответ строго как JSON-объект без ``` и "
                         "без пояснений. Формат: "
                         '{"action": "reply"|"skip", "reply_mode": '

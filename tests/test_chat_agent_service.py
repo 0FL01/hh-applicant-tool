@@ -9,7 +9,7 @@ openai_module.OpenAI = object
 sys.modules.setdefault("openai", openai_module)
 
 from hh_applicant_tool.storage import StorageFacade
-from hh_llm_agent.config import AgentConfig, OpenRouterConfig
+from hh_llm_agent.config import AgentConfig, ClassifierConfig, OpenRouterConfig
 from hh_llm_agent.openrouter import LLMReply
 from hh_llm_agent.service import ChatAgentService
 from hh_llm_agent.timing import AgentTimingConfig, TimingPolicy
@@ -44,6 +44,29 @@ RESUME = {
 
 ME = {"first_name": "Ivan", "last_name": "Petrov"}
 
+REPLY_MODEL = "reply-model"
+CLASSIFIER_MODEL = "classifier-model"
+
+DEFAULT_REPLY = LLMReply(
+    content='{"action":"reply","reply_mode":"single","reply_text":"Здравствуйте!","reason":"need_reply"}',
+    parsed={
+        "action": "reply",
+        "reply_mode": "single",
+        "reply_text": "Здравствуйте!",
+        "reason": "need_reply",
+    },
+)
+
+DEFAULT_CLASSIFIER_REPLY = LLMReply(
+    content='{"action":"reply","category":"human_actionable","reason":"direct_question","confidence":0.98}',
+    parsed={
+        "action": "reply",
+        "category": "human_actionable",
+        "reason": "direct_question",
+        "confidence": 0.98,
+    },
+)
+
 
 class FakeGateway:
     def __init__(self, responses=None):
@@ -75,33 +98,59 @@ class FakeGateway:
 
 class FakeLLMClient:
     instances = []
-    reply = LLMReply(
-        content='{"action":"reply","reply_mode":"single","reply_text":"Здравствуйте!","reason":"need_reply"}',
-        parsed={
-            "action": "reply",
-            "reply_mode": "single",
-            "reply_text": "Здравствуйте!",
-            "reason": "need_reply",
-        },
-    )
+    replies = {
+        REPLY_MODEL: DEFAULT_REPLY,
+        CLASSIFIER_MODEL: DEFAULT_CLASSIFIER_REPLY,
+    }
 
     def __init__(self, config):
         self.config = config
         self.calls = []
         self.__class__.instances.append(self)
 
-    def complete_json(self, messages):
-        self.calls.append(messages)
-        return self.__class__.reply
+    @classmethod
+    def reset(cls):
+        cls.instances = []
+        cls.replies = {
+            REPLY_MODEL: DEFAULT_REPLY,
+            CLASSIFIER_MODEL: DEFAULT_CLASSIFIER_REPLY,
+        }
+
+    @classmethod
+    def by_model(cls, model):
+        return [
+            instance
+            for instance in cls.instances
+            if instance.config.model == model
+        ]
+
+    def complete_json(self, messages, **kwargs):
+        self.calls.append((messages, kwargs))
+        return self.__class__.replies[self.config.model]
 
 
 def make_tool():
     return SimpleNamespace(storage=StorageFacade(sqlite3.connect(":memory:")))
 
 
-def make_config(*, dry_run, incoming_collect_seconds=0):
+def make_config(
+    *,
+    dry_run,
+    incoming_collect_seconds=0,
+    classifier_enabled=True,
+):
     return AgentConfig(
-        openrouter=OpenRouterConfig(api_key="token"),
+        openrouter=OpenRouterConfig(api_key="token", model=REPLY_MODEL),
+        classifier=ClassifierConfig(
+            enabled=classifier_enabled,
+            openrouter=OpenRouterConfig(
+                api_key="token",
+                model=CLASSIFIER_MODEL,
+                temperature=0.0,
+                max_completion_tokens=128,
+                reasoning_enabled=False,
+            ),
+        ),
         dry_run=dry_run,
         timing=AgentTimingConfig(
             sleep_min_minutes=20,
@@ -124,12 +173,14 @@ def make_service(
     *,
     dry_run,
     incoming_collect_seconds=0,
+    classifier_enabled=True,
 ):
     monkeypatch.setattr(
         "hh_llm_agent.service.load_agent_config",
         lambda tool, args: make_config(
             dry_run=dry_run,
             incoming_collect_seconds=incoming_collect_seconds,
+            classifier_enabled=classifier_enabled,
         ),
     )
     monkeypatch.setattr("hh_llm_agent.service.HHGateway", lambda tool: gateway)
@@ -143,16 +194,7 @@ def make_service(
 
 
 def test_dry_run_does_not_persist_decisions_and_can_repeat(monkeypatch):
-    FakeLLMClient.instances = []
-    FakeLLMClient.reply = LLMReply(
-        content='{"action":"reply","reply_mode":"single","reply_text":"Здравствуйте!","reason":"need_reply"}',
-        parsed={
-            "action": "reply",
-            "reply_mode": "single",
-            "reply_text": "Здравствуйте!",
-            "reason": "need_reply",
-        },
-    )
+    FakeLLMClient.reset()
     tool = make_tool()
 
     first_service = make_service(monkeypatch, tool, FakeGateway(), dry_run=True)
@@ -166,13 +208,26 @@ def test_dry_run_does_not_persist_decisions_and_can_repeat(monkeypatch):
     assert first_stats.replied == 1
     assert second_stats.replied == 1
     assert tool.storage.agent_decisions.count_total() == 0
-    assert len(FakeLLMClient.instances) == 2
-    assert len(FakeLLMClient.instances[0].calls) == 1
-    assert len(FakeLLMClient.instances[1].calls) == 1
+    assert len(FakeLLMClient.by_model(REPLY_MODEL)) == 2
+    assert len(FakeLLMClient.by_model(CLASSIFIER_MODEL)) == 2
+    assert (
+        sum(
+            len(instance.calls)
+            for instance in FakeLLMClient.by_model(REPLY_MODEL)
+        )
+        == 2
+    )
+    assert (
+        sum(
+            len(instance.calls)
+            for instance in FakeLLMClient.by_model(CLASSIFIER_MODEL)
+        )
+        == 2
+    )
 
 
 def test_existing_dry_run_decision_does_not_block_processing(monkeypatch):
-    FakeLLMClient.instances = []
+    FakeLLMClient.reset()
     tool = make_tool()
     tool.storage.agent_runs.save(
         {
@@ -204,13 +259,13 @@ def test_existing_dry_run_decision_does_not_block_processing(monkeypatch):
     stats = service.run()
 
     assert stats.replied == 1
-    assert len(FakeLLMClient.instances) == 1
-    assert len(FakeLLMClient.instances[0].calls) == 1
+    assert len(FakeLLMClient.by_model(REPLY_MODEL)[0].calls) == 1
+    assert len(FakeLLMClient.by_model(CLASSIFIER_MODEL)[0].calls) == 1
     assert tool.storage.agent_decisions.count_total() == 1
 
 
 def test_real_decision_still_blocks_reprocessing(monkeypatch):
-    FakeLLMClient.instances = []
+    FakeLLMClient.reset()
     tool = make_tool()
     tool.storage.agent_runs.save(
         {
@@ -242,13 +297,39 @@ def test_real_decision_still_blocks_reprocessing(monkeypatch):
     stats = service.run()
 
     assert stats.skipped == 1
-    assert len(FakeLLMClient.instances) == 1
-    assert len(FakeLLMClient.instances[0].calls) == 0
+    assert len(FakeLLMClient.by_model(REPLY_MODEL)[0].calls) == 0
+    assert len(FakeLLMClient.by_model(CLASSIFIER_MODEL)[0].calls) == 0
+
+
+def test_classifier_skip_prevents_reply_generation(monkeypatch):
+    FakeLLMClient.reset()
+    FakeLLMClient.replies[CLASSIFIER_MODEL] = LLMReply(
+        content='{"action":"skip","category":"passive_update","reason":"auto_ack","confidence":0.99}',
+        parsed={
+            "action": "skip",
+            "category": "passive_update",
+            "reason": "auto_ack",
+            "confidence": 0.99,
+        },
+    )
+    tool = make_tool()
+
+    service = make_service(monkeypatch, tool, FakeGateway(), dry_run=False)
+    stats = service.run()
+
+    assert stats.skipped == 1
+    assert len(FakeLLMClient.by_model(CLASSIFIER_MODEL)[0].calls) == 1
+    assert len(FakeLLMClient.by_model(REPLY_MODEL)[0].calls) == 0
+    decisions = list(tool.storage.agent_decisions.find())
+    assert len(decisions) == 1
+    assert decisions[0].classifier_category == "passive_update"
+    assert decisions[0].classifier_reason == "auto_ack"
+    assert decisions[0].classifier_model == CLASSIFIER_MODEL
 
 
 def test_qa_series_is_queued_and_sent_in_order(monkeypatch):
-    FakeLLMClient.instances = []
-    FakeLLMClient.reply = LLMReply(
+    FakeLLMClient.reset()
+    FakeLLMClient.replies[REPLY_MODEL] = LLMReply(
         content='{"action":"reply","reply_mode":"qa_series","reply_messages":["msg1","msg2"],"reason":"screening"}',
         parsed={
             "action": "reply",
@@ -268,14 +349,15 @@ def test_qa_series_is_queued_and_sent_in_order(monkeypatch):
     decisions = list(tool.storage.agent_decisions.find())
     assert len(decisions) == 1
     assert decisions[0].reply_text == "msg1\n\nmsg2"
+    assert decisions[0].classifier_category == "human_actionable"
     outbox_items = list(tool.storage.agent_outbox.find())
     assert len(outbox_items) == 2
     assert all(item.status == "sent" for item in outbox_items)
 
 
 def test_recent_messages_are_collected_before_llm_call(monkeypatch):
-    FakeLLMClient.instances = []
-    FakeLLMClient.reply = LLMReply(
+    FakeLLMClient.reset()
+    FakeLLMClient.replies[REPLY_MODEL] = LLMReply(
         content='{"action":"reply","reply_mode":"single","reply_text":"combined","reason":"need_reply"}',
         parsed={
             "action": "reply",
@@ -319,13 +401,15 @@ def test_recent_messages_are_collected_before_llm_call(monkeypatch):
     assert stats.replied == 1
     assert gateway.fetch_calls == 2
     assert slept == [100.0]
-    final_prompt = FakeLLMClient.instances[0].calls[0][-1]["content"]
+    final_prompt = FakeLLMClient.by_model(REPLY_MODEL)[0].calls[0][0][-1][
+        "content"
+    ]
     assert "Добрый день!" in final_prompt
     assert "Какие у вас ожидания по зарплате?" in final_prompt
 
 
 def test_run_logs_reply_summary(monkeypatch, caplog):
-    FakeLLMClient.instances = []
+    FakeLLMClient.reset()
     tool = make_tool()
     service = make_service(monkeypatch, tool, FakeGateway(), dry_run=True)
 
@@ -337,6 +421,7 @@ def test_run_logs_reply_summary(monkeypatch, caplog):
     messages = [record.getMessage() for record in caplog.records]
     assert any("Chat agent run started:" in message for message in messages)
     assert any("Negotiation 1 start:" in message for message in messages)
+    assert any("Negotiation 1 classifier:" in message for message in messages)
     assert any("Negotiation 1 LLM decision:" in message for message in messages)
     assert any(
         "Negotiation 1 dry-run reply:" in message for message in messages
@@ -345,7 +430,7 @@ def test_run_logs_reply_summary(monkeypatch, caplog):
 
 
 def test_run_logs_skip_summary(monkeypatch, caplog):
-    FakeLLMClient.instances = []
+    FakeLLMClient.reset()
     tool = make_tool()
     gateway = FakeGateway(responses=[[]])
     service = make_service(monkeypatch, tool, gateway, dry_run=True)

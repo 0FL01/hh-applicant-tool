@@ -35,6 +35,14 @@ class Namespace(BaseNamespace):
     skip_blacklisted: bool | None
     openrouter_api_key: str | None
     openrouter_base_url: str | None
+    classifier_enabled: bool | None
+    classifier_model: str | None
+    classifier_temperature: float | None
+    classifier_max_completion_tokens: int | None
+    classifier_system_prompt: str | None
+    classifier_instruction: str | None
+    classifier_reasoning: bool | None
+    classifier_max_history_messages: int | None
     force: bool
     daemon: bool
     poll_interval: int
@@ -124,6 +132,45 @@ class Operation(BaseOperation):
         parser.add_argument(
             "--openrouter-base-url",
             help="Base URL OpenRouter-compatible API",
+        )
+        parser.add_argument(
+            "--classifier-enabled",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="Включить отдельную модель-классификатор перед генерацией ответа",
+        )
+        parser.add_argument(
+            "--classifier-model",
+            help="Модель OpenRouter для классификатора",
+        )
+        parser.add_argument(
+            "--classifier-temperature",
+            type=float,
+            help="Температура классификатора",
+        )
+        parser.add_argument(
+            "--classifier-max-completion-tokens",
+            type=int,
+            help="Лимит токенов на ответ классификатора",
+        )
+        parser.add_argument(
+            "--classifier-system-prompt",
+            help="Системный промпт для классификатора",
+        )
+        parser.add_argument(
+            "--classifier-instruction",
+            help="Инструкция для классификатора",
+        )
+        parser.add_argument(
+            "--classifier-reasoning",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="Включить reasoning для классификатора",
+        )
+        parser.add_argument(
+            "--classifier-max-history-messages",
+            type=int,
+            help="Сколько последних сообщений отдавать классификатору",
         )
         parser.add_argument(
             "--force",
@@ -241,9 +288,12 @@ class Operation(BaseOperation):
         policy = TimingPolicy(config.timing)
         now = policy.now()
         logger.info(
-            "Starting chat agent daemon: profile=%s model=%s dry_run=%s timezone=%s quiet_hours=%s now=%s sleep_window=%s-%s minutes",
+            "Starting chat agent daemon: profile=%s model=%s classifier=%s dry_run=%s timezone=%s quiet_hours=%s now=%s sleep_window=%s-%s minutes",
             tool.args.profile_id or ".",
             config.openrouter.model,
+            config.classifier.openrouter.model
+            if config.classifier and config.classifier.enabled
+            else "disabled",
             config.dry_run,
             config.timing.timezone,
             self._quiet_hours_window(config),

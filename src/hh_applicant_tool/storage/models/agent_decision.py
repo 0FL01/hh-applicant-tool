@@ -22,4 +22,9 @@ class AgentDecisionModel(BaseModel):
     reasoning_details: list[dict] = mapped(
         default_factory=list, store_json=True
     )
+    classifier_category: str | None = None
+    classifier_reason: str | None = None
+    classifier_confidence: float | None = None
+    classifier_model: str | None = None
+    classifier_raw_response: str | None = None
     created_at: datetime | None = None

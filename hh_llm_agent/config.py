@@ -8,11 +8,16 @@ from .timing import AgentTimingConfig
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = "google/gemini-3.1-flash-lite-preview"
+DEFAULT_CLASSIFIER_MODEL = "google/gemma-3-27b-it"
 DEFAULT_SYSTEM_PROMPT = (
     "Ты соискатель на HeadHunter. Отвечай работодателю по-русски, вежливо, "
     "кратко и по делу. Не выдумывай факты о кандидате. Если в переписке не "
     "хватает данных, предложи уточнить детали. Не используй markdown, списки, "
     "эмодзи и канцелярит."
+)
+DEFAULT_CLASSIFIER_SYSTEM_PROMPT = (
+    "Ты классификатор входящих сообщений в чатах hh.ru. Определи, нужно ли "
+    "кандидату отвечать прямо сейчас. Отвечай только JSON без пояснений."
 )
 DEFAULT_REPLY_INSTRUCTION = (
     "Проанализируй переписку и верни JSON с полями action, reply_mode, "
@@ -22,6 +27,16 @@ DEFAULT_REPLY_INSTRUCTION = (
     "пакете несколько screening-вопросов и естественнее ответить короткой "
     "серией, выбери qa_series и верни 2-3 коротких сообщения в reply_messages. "
     "Если отвечать не нужно, выбери skip и кратко объясни why в reason."
+)
+DEFAULT_CLASSIFIER_INSTRUCTION = (
+    "Проанализируй переписку и верни JSON с полями action, category, reason, "
+    "confidence. action может быть только reply или skip. category может быть "
+    "только human_actionable, bot_actionable, passive_update, "
+    "marketing_broadcast, system_event или irrelevant. reply ставь только если "
+    "в последнем неотвеченном пакете есть прямой вопрос, screening, просьба "
+    "подтвердить интерес, сообщить данные или выполнить следующий шаг. skip "
+    "ставь для автоуведомлений, брендовых рассылок, thank-you сообщений без "
+    "действия, системных событий и прочего шума. confidence - число от 0 до 1."
 )
 
 
@@ -38,8 +53,18 @@ class OpenRouterConfig:
 
 
 @dataclass(frozen=True)
+class ClassifierConfig:
+    openrouter: OpenRouterConfig
+    enabled: bool = True
+    system_prompt: str = DEFAULT_CLASSIFIER_SYSTEM_PROMPT
+    instruction: str = DEFAULT_CLASSIFIER_INSTRUCTION
+    max_history_messages: int = 8
+
+
+@dataclass(frozen=True)
 class AgentConfig:
     openrouter: OpenRouterConfig
+    classifier: ClassifierConfig | None = None
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     reply_instruction: str = DEFAULT_REPLY_INSTRUCTION
     max_history_messages: int = 12
@@ -98,6 +123,7 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
 
     openrouter_cfg = config.get("openrouter", {})
     agent_cfg = config.get("chat_agent", {})
+    classifier_cfg = _get_nested(agent_cfg, "classifier", {}) or {}
 
     api_key = (
         getattr(args, "openrouter_api_key", None)
@@ -200,6 +226,91 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         ),
     )
 
+    classifier_enabled = _parse_env_bool("CHAT_AGENT_CLASSIFIER_ENABLED")
+    if classifier_enabled is None:
+        classifier_enabled = (
+            getattr(args, "classifier_enabled", None)
+            if getattr(args, "classifier_enabled", None) is not None
+            else classifier_cfg.get("enabled", True)
+        )
+
+    classifier_temperature_str = getenv("CHAT_AGENT_CLASSIFIER_TEMPERATURE")
+    classifier_temperature = (
+        float(classifier_temperature_str)
+        if classifier_temperature_str is not None
+        else (
+            getattr(args, "classifier_temperature", None)
+            if getattr(args, "classifier_temperature", None) is not None
+            else classifier_cfg.get("temperature", 0.0)
+        )
+    )
+
+    classifier_max_tokens_str = getenv(
+        "CHAT_AGENT_CLASSIFIER_MAX_COMPLETION_TOKENS"
+    )
+    classifier_max_completion_tokens = (
+        int(classifier_max_tokens_str)
+        if classifier_max_tokens_str is not None
+        else (
+            getattr(args, "classifier_max_completion_tokens", None)
+            or classifier_cfg.get("max_completion_tokens", 256)
+        )
+    )
+
+    classifier_model = (
+        getenv("CHAT_AGENT_CLASSIFIER_MODEL")
+        or getattr(args, "classifier_model", None)
+        or classifier_cfg.get("model")
+        or DEFAULT_CLASSIFIER_MODEL
+    )
+
+    classifier_max_history_messages = _env_or_value(
+        "CHAT_AGENT_CLASSIFIER_MAX_HISTORY_MESSAGES",
+        getattr(args, "classifier_max_history_messages", None),
+        classifier_cfg.get("max_history_messages"),
+        8,
+        int,
+    )
+
+    classifier_system_prompt = (
+        getenv("CHAT_AGENT_CLASSIFIER_SYSTEM_PROMPT")
+        or getattr(args, "classifier_system_prompt", None)
+        or classifier_cfg.get("system_prompt")
+        or DEFAULT_CLASSIFIER_SYSTEM_PROMPT
+    )
+
+    classifier_instruction = (
+        getenv("CHAT_AGENT_CLASSIFIER_INSTRUCTION")
+        or getattr(args, "classifier_instruction", None)
+        or classifier_cfg.get("instruction")
+        or DEFAULT_CLASSIFIER_INSTRUCTION
+    )
+
+    classifier_reasoning = _parse_env_bool("CHAT_AGENT_CLASSIFIER_REASONING")
+    if classifier_reasoning is None:
+        classifier_reasoning = (
+            getattr(args, "classifier_reasoning", None)
+            if getattr(args, "classifier_reasoning", None) is not None
+            else classifier_cfg.get("reasoning_enabled", False)
+        )
+
+    classifier = ClassifierConfig(
+        enabled=bool(classifier_enabled),
+        openrouter=OpenRouterConfig(
+            api_key=api_key,
+            base_url=base_url,
+            model=classifier_model,
+            temperature=classifier_temperature,
+            max_completion_tokens=classifier_max_completion_tokens,
+            reasoning_enabled=bool(classifier_reasoning),
+            app_name=openrouter.app_name,
+            referer=openrouter.referer,
+        ),
+        system_prompt=classifier_system_prompt,
+        instruction=classifier_instruction,
+        max_history_messages=classifier_max_history_messages,
+    )
+
     quiet_hours_enabled = _parse_env_bool("CHAT_AGENT_QUIET_HOURS")
     if quiet_hours_enabled is None:
         quiet_hours_enabled = (
@@ -291,6 +402,7 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
 
     return AgentConfig(
         openrouter=openrouter,
+        classifier=classifier,
         system_prompt=system_prompt,
         reply_instruction=reply_instruction,
         max_history_messages=max_history_messages,

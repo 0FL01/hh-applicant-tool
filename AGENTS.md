@@ -55,17 +55,26 @@ The default branch is `main`.
 - Idempotent chat processing: агент не должен отвечать повторно на одно и то же последнее сообщение, если нет явного `--force`.
 - Durable reply delivery: если агент планирует серию ответов, они должны жить в outbox и переживать рестарты/quiet hours без дублей.
 
-### 2. LLM Agent Workflow
+### 2. LLM Agent Workflow (2-stage classifier + reply LLM)
 - Источник чатов: агент читает переговоры через `tool.get_negotiations()` и историю сообщений через `/negotiations/{nid}/messages`.
 - Batch schedule: в daemon-режиме агент работает проходами, затем спит случайный интервал `sleep_min_minutes..sleep_max_minutes`; ночью по умолчанию не отвечает (`23:00-08:00`, `Europe/Moscow`).
 - Фильтрация: агент пропускает неподходящие переговоры по `resume_id`, `period_days`, blacklist, `only_invitations`, состоянию `discard` и отсутствию текстовых сообщений.
 - Триггер ответа: агент отвечает только на неотвеченный хвост сообщений работодателя после последнего сообщения кандидата.
 - Debounce: если последнее сообщение работодателя слишком свежее, агент выдерживает `incoming_collect_seconds`, перечитывает чат и пытается склеить подряд идущие реплики в один пакет.
 - Дедупликация: если `(negotiation_id, last_message_id)` уже есть в `agent_decisions`, чат пропускается, если не передан `--force`.
-- Подготовка prompt: в модель передаются системный prompt, контекст по кандидату/резюме/вакансии/работодателю, последние сообщения, неотвеченный employer-tail и инструкция вернуть JSON `action/reply_mode/reply_text/reply_messages/reason`.
-- LLM decision: OpenRouter вызывается с reasoning; если модель вернула невалидный JSON, выполняется repair-запрос с сохранением `reasoning_details`.
+- **Stage 1 — Classifier gate** (если включен): отдельная дешевая модель классифицирует входящий пакет employer-tail по категориям:
+  - `human_actionable` — есть прямой вопрос, screening, просьба данных, подтверждающий интерес → pass to reply LLM
+  - `bot_actionable` — hh bot / AI assistant / robot recruiter задает вопросы → pass to reply LLM
+  - `passive_update` — автоуведомления, thank-you без действия → skip
+  - `marketing_broadcast` — брендовые портянки, соцсети, "узнайте нас лучше" → skip
+  - `system_event` — join/leave ботов, системные события → skip
+  - `irrelevant` — всё остальное → skip
+  - Если classifier сказал `skip`, решение сразу сохраняется в `agent_decisions`, reply LLM не вызывается.
+- **Stage 2 — Reply LLM**: только для `human_actionable` / `bot_actionable`:
+  - В модель передаются системный prompt, контекст по кандидату/резюме/вакансии/работодателю, последние сообщения, неотвеченный employer-tail и инструкция вернуть JSON `action/reply_mode/reply_text/reply_messages/reason`.
+  - LLM decision: OpenRouter вызывается с reasoning; если модель вернула невалидный JSON, выполняется repair-запрос с сохранением `reasoning_details`.
 - Выполнение решения:
-  - `skip` -> сохраняется решение в `agent_decisions`
+  - `skip` -> сохраняется решение в `agent_decisions` (classifier или reply-модель)
   - `reply` + `dry_run` -> печатается предполагаемый ответ без отправки
   - `reply(single)` -> один ответ отправляется через API `/negotiations/{nid}/messages`
   - `reply(qa_series)` -> 2-3 коротких сообщения кладутся в `agent_outbox` и отправляются с jitter между частями
@@ -73,7 +82,7 @@ The default branch is `main`.
   - `negotiations` - sync переговоров
   - `chat_messages` - локальный кеш сообщений
   - `agent_runs` - статистика запуска агента
-  - `agent_decisions` - решения модели, причины skip, reply text, raw_response, reasoning_details
+  - `agent_decisions` - решения модели, причины skip, reply text, raw_response, reasoning_details, plus classifier metadata (`classifier_category`, `classifier_reason`, `classifier_confidence`, `classifier_model`, `classifier_raw_response`)
   - `agent_outbox` - отложенные части Q/A-серий, их статус, время отправки и ошибки
 
 ### 3. Logging (INFO level)
@@ -120,6 +129,7 @@ Chat agent пишет подробные INFO-логи на каждом эта�
 - **Typing/linting**: pyright включен в режиме `off`; основной линтинг через `ruff` и `pylint`.
 - **Tests**: использовать `pytest` (основной smoke check перед изменениями в логике).
 - **OpenRouter defaults**: базовая модель по умолчанию - `google/gemini-3.1-flash-lite-preview`, reasoning включен по умолчанию, max_completion_tokens=1200, max_history_messages=12, temperature=0.2.
+- **Classifier defaults**: классификатор включен по умолчанию, дефолтная модель — `google/gemma-3-27b-it`, deterministic режим (temperature=0), reasoning выключен, max_completion_tokens=256, max_history_messages=8.
 - **Chat timing defaults**: quiet hours включены по умолчанию (`23:00-08:00`, `Europe/Moscow`), debounce новых employer-сообщений 120 секунд, batch-sleep 20-30 минут.
 
 ## Runtime Notes for Agents
@@ -132,6 +142,14 @@ Chat agent пишет подробные INFO-логи на каждом эта�
   - `openrouter.temperature` (дефолт: 0.2)
   - `openrouter.max_completion_tokens` (дефолт: 1200)
   - `openrouter.reasoning_enabled` (дефолт: true)
+  - `chat_agent.classifier.enabled` (дефолт: true) — включить/выключить classifier gate
+  - `chat_agent.classifier.model` (дефолт: `google/gemma-3-27b-it`) — модель классификатора
+  - `chat_agent.classifier.temperature` (дефолт: 0.0) — deterministic для классификатора
+  - `chat_agent.classifier.max_completion_tokens` (дефолт: 256) — маленький лимит токенов
+  - `chat_agent.classifier.reasoning_enabled` (дефолт: false) — reasoning выключен для экономии
+  - `chat_agent.classifier.max_history_messages` (дефолт: 8) — сколько истории давать классификатору
+  - `chat_agent.classifier.system_prompt` (есть дефолт на русском)
+  - `chat_agent.classifier.instruction` (есть дефолт с категориями)
   - `chat_agent.system_prompt` (есть дефолт на русском)
   - `chat_agent.reply_instruction` (есть дефолт)
   - `chat_agent.max_history_messages` (дефолт: 12)
@@ -165,6 +183,14 @@ Chat agent пишет подробные INFO-логи на каждом эта�
   - `CHAT_AGENT_PERIOD_DAYS`
   - `CHAT_AGENT_SYSTEM_PROMPT`
   - `CHAT_AGENT_REPLY_INSTRUCTION`
+  - `CHAT_AGENT_CLASSIFIER_ENABLED` (дефолт: true)
+  - `CHAT_AGENT_CLASSIFIER_MODEL` (дефолт: `google/gemma-3-27b-it`)
+  - `CHAT_AGENT_CLASSIFIER_TEMPERATURE` (дефолт: 0.0)
+  - `CHAT_AGENT_CLASSIFIER_MAX_COMPLETION_TOKENS` (дефолт: 256)
+  - `CHAT_AGENT_CLASSIFIER_REASONING` (дефолт: false)
+  - `CHAT_AGENT_CLASSIFIER_MAX_HISTORY_MESSAGES` (дефолт: 8)
+  - `CHAT_AGENT_CLASSIFIER_SYSTEM_PROMPT`
+  - `CHAT_AGENT_CLASSIFIER_INSTRUCTION`
 
 ### Docker Notes
 - Основной app container и LLM agent container разные по назначению.
@@ -183,3 +209,4 @@ Chat agent пишет подробные INFO-логи на каждом эта�
 7. Не коммить секреты и runtime-артефакты из `config/`, `.env`, токены, cookies и локальные DB/log файлы.
 8. Для проверки изменений запускай минимум `pytest`, а для CLI-поведения - целевую команду через `python -m hh_applicant_tool ...`.
 9. Для OpenRouter-логики отдельно полезно гонять `tests/test_openrouter_client.py`.
+10. **Tuning classifier prompts**: если агент пропускает шум (автоответы, брендовые рассылки, thank-you без действия), скорректируй `chat_agent.classifier.instruction` или `chat_agent.classifier.system_prompt`; classifier дешевый, поэтому можно агрессивно тюнить под реальные кейсы шума, не тратя токены на reply-модель.
