@@ -220,6 +220,13 @@ class HHApplicantTool:
         args = self.args
         config = self.config
         token = config.get("token", {})
+        user_agent = args.user_agent or config.get("user_agent")
+
+        if not user_agent:
+            user_agent = utils.generate_android_useragent()
+            config.save(user_agent=user_agent)
+            logger.debug("Generated and saved profile user-agent")
+
         return api.client.ApiClient(
             client_id=config.get("client_id"),
             client_secret=config.get("client_secret"),
@@ -227,7 +234,7 @@ class HHApplicantTool:
             refresh_token=token.get("refresh_token"),
             access_expires_at=token.get("access_expires_at"),
             delay=args.api_delay or config.get("api_delay"),
-            user_agent=args.user_agent or config.get("user_agent"),
+            user_agent=user_agent,
             session=self.session,
         )
 

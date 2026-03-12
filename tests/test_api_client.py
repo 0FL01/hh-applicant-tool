@@ -34,14 +34,28 @@ class FakeSession:
         return self.responses.pop(0)
 
 
+class FakeConfig(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.saved = []
+
+    def save(self, **kwargs):
+        self.saved.append(kwargs)
+        self.update(kwargs)
+
+
 def test_api_client_uses_client_secret_from_config():
-    tool = SimpleNamespace(
-        args=SimpleNamespace(api_delay=None, user_agent=None),
-        config={
+    config = FakeConfig(
+        {
             "client_id": "client-id",
             "client_secret": "client-secret",
             "token": {},
-        },
+            "user_agent": "saved-user-agent",
+        }
+    )
+    tool = SimpleNamespace(
+        args=SimpleNamespace(api_delay=None, user_agent=None),
+        config=config,
         session=FakeSession([]),
     )
 
@@ -49,6 +63,28 @@ def test_api_client_uses_client_secret_from_config():
 
     assert client.client_id == "client-id"
     assert client.client_secret == "client-secret"
+    assert client.user_agent == "saved-user-agent"
+    assert config.saved == []
+
+
+def test_api_client_generates_and_persists_profile_user_agent(monkeypatch):
+    config = FakeConfig({"token": {}})
+    tool = SimpleNamespace(
+        args=SimpleNamespace(api_delay=None, user_agent=None),
+        config=config,
+        session=FakeSession([]),
+    )
+
+    monkeypatch.setattr(
+        "hh_applicant_tool.main.utils.generate_android_useragent",
+        lambda: "stable-user-agent",
+    )
+
+    client = HHApplicantTool.api_client.func(tool)
+
+    assert client.user_agent == "stable-user-agent"
+    assert config["user_agent"] == "stable-user-agent"
+    assert config.saved == [{"user_agent": "stable-user-agent"}]
 
 
 def test_api_client_refreshes_after_forbidden_before_local_expiry(monkeypatch):
