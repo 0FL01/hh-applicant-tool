@@ -25,9 +25,18 @@ The default branch is `main`.
 - `src/hh_applicant_tool/operations/` - набор CLI-команд (плагинная модель: модули подхватываются автоматически)
 - `src/hh_applicant_tool/api/` - HTTP-клиенты к hh API/OAuth, типы и обработка API-ошибок
 - `src/hh_applicant_tool/storage/` - facade + repositories + dataclass-модели для SQLite
+  - `storage/facade.py` - единая точка доступа к persistence-слою
+  - `storage/repositories/` - репозитории для всех таблиц (agent_runs, agent_decisions, agent_outbox, negotiations, etc.)
+  - `storage/models/` - dataclass-модели для всех таблиц
+  - `storage/queries/schema.sql` - SQL схема с индексами и триггерами
 - `src/hh_applicant_tool/ai/` - старый OpenAI-compatible слой для простых single-shot сценариев
 - `src/hh_applicant_tool/utils/` - утилиты (конфиг, логирование, cookiejar, терминал, JSON и пр.)
 - `hh_llm_agent/` - отдельный root-level модуль LLM-агента для автоответов в чатах работодателей
+  - `hh_llm_agent/config.py` - загрузка конфигурации из CLI flags, config.json и env vars
+  - `hh_llm_agent/gateway.py` - абстракционный слой над HH API для агента
+  - `hh_llm_agent/service.py` - основной workflow автоответов
+  - `hh_llm_agent/openrouter.py` - клиент OpenRouter с structured outputs и rate limiting
+  - `hh_llm_agent/timing.py` - политика сна агента, quiet hours, jitter
 - `tests/` - тесты (pytest)
 - `docs/hhapi/openapi.yml` - архивная OpenAPI-спека hh API
 - `config/` - runtime-данные профилей (tokens/cookies/log/db), локальные и не для коммита секретов
@@ -39,9 +48,10 @@ The default branch is `main`.
 - **HHApplicantTool (`main.py`)**: формирует parser, динамически регистрирует команды из `operations`, предоставляет shared services для операций. Настраивает логгеры `hh_applicant_tool` и `hh_llm_agent`.
 - **ApiClient/OAuthClient (`api/client.py`)**: обертка над `requests` c rate-delay, авторизационными заголовками и авто-refresh access token.
 - **StorageFacade (`storage/facade.py`)**: единая точка доступа к persistence-слою SQLite, включая репозитории агента.
+- **HHGateway (`hh_llm_agent/gateway.py`)**: абстракционный слой над HH API для агента (получение пользователя, резюме, переговоров, сообщений, отправка ответов).
 - **Chat Agent Operation (`src/hh_applicant_tool/operations/chat_agent.py`)**: CLI-адаптер для `hh_llm_agent`, поддерживает one-shot и daemon-loop режимы. Отвечает за daemon циклы, quiet hours логирование и cycle summary.
 - **ChatAgentService (`hh_llm_agent/service.py`)**: основной workflow автоответов: batch-run, quiet hours, debounce свежих сообщений работодателя, single-reply/QA-series планирование, outbox и audit в SQLite. Логирует run lifecycle, negotiation start/outcome и LLM решения на INFO.
-- **OpenRouterChatClient (`hh_llm_agent/openrouter.py`)**: клиент OpenRouter через SDK `openai` со structured outputs (`response_format=json_schema`), `require_parameters=true`, reasoning и `response-healing` plugin.
+- **OpenRouterChatClient (`hh_llm_agent/openrouter.py`)**: клиент OpenRouter через SDK `openai` со structured outputs (`response_format=json_schema`), `require_parameters=true`, reasoning и `response-healing` plugin, rate limiting и retry.
 - **TimingPolicy (`hh_llm_agent/timing.py`)**: политика сна агента, quiet hours по таймзоне, jitter между циклами и сообщениями.
 
 ## Architecture & Rules
@@ -84,6 +94,14 @@ The default branch is `main`.
   - `agent_runs` - статистика запуска агента
   - `agent_decisions` - решения модели, причины skip, reply text, raw_response, reasoning_details, plus classifier metadata (`classifier_category`, `classifier_reason`, `classifier_confidence`, `classifier_model`, `classifier_raw_response`)
   - `agent_outbox` - отложенные части Q/A-серий, их статус, время отправки и ошибки
+  - `employers` - работодатели
+  - `vacancies` - вакансии
+  - `vacancy_contacts` - контакты работодателей
+  - `employer_sites` - сайты работодателей
+  - `resumes` - резюме кандидата
+  - `settings` - ключ-значение хранилище настроек
+- Индексы: `idx_agent_decisions_neg_msg`, `idx_agent_outbox_status_send_after`, `idx_agent_runs_created`, `idx_vac_upd`, `idx_emp_upd`, `idx_neg_upd`, `idx_chat_messages_neg`, `idx_emp_site_upd`
+- Триггеры: автоматическое обновление `updated_at` для всех таблиц при изменении записей
 
 ### 3. Logging (INFO level)
 Chat agent пишет подробные INFO-логи на каждом этапе работы:
@@ -128,9 +146,9 @@ Chat agent пишет подробные INFO-логи на каждом эта�
 - **Error handling**: в `HHApplicantTool.run()` централизованно обрабатываются API/SQLite/runtime исключения, лог пишется в профильный `log.txt`.
 - **Typing/linting**: pyright включен в режиме `off`; основной линтинг через `ruff` и `pylint`.
 - **Tests**: использовать `pytest` (основной smoke check перед изменениями в логике).
-- **OpenRouter defaults**: базовая модель по умолчанию - `google/gemini-3.1-flash-lite-preview`, reasoning включен по умолчанию, max_completion_tokens=1200, max_history_messages=12, temperature=0.2.
+- **OpenRouter defaults**: базовая модель по умолчанию - `google/gemini-3.1-flash-lite-preview`, reasoning включен по умолчанию, max_completion_tokens=1200, max_history_messages=12, temperature=0.2, request_interval_seconds=0.35, max_retries_on_rate_limit=2, rate_limit_retry_base_seconds=2.0.
 - **Classifier defaults**: классификатор включен по умолчанию, дефолтная модель — `google/gemma-3-27b-it`, deterministic режим (temperature=0), reasoning выключен, max_completion_tokens=256, max_history_messages=8.
-- **Chat timing defaults**: quiet hours включены по умолчанию (`23:00-08:00`, `Europe/Moscow`), debounce новых employer-сообщений 120 секунд, batch-sleep 20-30 минут.
+- **Chat timing defaults**: quiet hours включены по умолчанию (`23:00-08:00`, `Europe/Moscow`), debounce новых employer-сообщений 120 секунд, batch-sleep 20-30 минут, reply_delay 15-60 секунд, qa_series_delay 30-120 секунд, wake_jitter 300 секунд.
 
 ## Runtime Notes for Agents
 
@@ -138,10 +156,14 @@ Chat agent пишет подробные INFO-логи на каждом эта�
 - CLI flags in `chat-agent`
 - `config.json` keys:
   - `openrouter.api_key` (обязателен)
+  - `openrouter.base_url` (дефолт: `https://openrouter.ai/api/v1`)
   - `openrouter.model` (дефолт: `google/gemini-3.1-flash-lite-preview`)
   - `openrouter.temperature` (дефолт: 0.2)
   - `openrouter.max_completion_tokens` (дефолт: 1200)
   - `openrouter.reasoning_enabled` (дефолт: true)
+  - `openrouter.request_interval_seconds` (дефолт: 0.35) — пауза между запросами к OpenRouter
+  - `openrouter.max_retries_on_rate_limit` (дефолт: 2) — количество ретраев при 429
+  - `openrouter.rate_limit_retry_base_seconds` (дефолт: 2.0) — база экспоненциальной задержки ретрая
   - `chat_agent.classifier.enabled` (дефолт: true) — включить/выключить classifier gate
   - `chat_agent.classifier.model` (дефолт: `google/gemma-3-27b-it`) — модель классификатора
   - `chat_agent.classifier.temperature` (дефолт: 0.0) — deterministic для классификатора
@@ -163,11 +185,13 @@ Chat agent пишет подробные INFO-логи на каждом эта�
   - `chat_agent.sleep_min_minutes` / `chat_agent.sleep_max_minutes` (дефолт: 20/30)
   - `chat_agent.timezone` (дефолт: `Europe/Moscow`)
   - `chat_agent.quiet_hours_enabled` / `quiet_hours_start` / `quiet_hours_end`
+  - `chat_agent.wake_jitter_seconds` (дефолт: 300) — случайный джиттер после выхода из quiet hours
   - `chat_agent.incoming_collect_seconds` (дефолт: 120)
-  - `chat_agent.reply_delay_min_seconds` / `reply_delay_max_seconds`
-  - `chat_agent.qa_series_delay_min_seconds` / `qa_series_delay_max_seconds`
+  - `chat_agent.reply_delay_min_seconds` (дефолт: 15) / `reply_delay_max_seconds` (дефолт: 60)
+  - `chat_agent.qa_series_delay_min_seconds` (дефолт: 30) / `qa_series_delay_max_seconds` (дефолт: 120)
 - Environment variables from `.env.example`:
   - `OPENROUTER_API_KEY` (обязателен)
+  - `OPENROUTER_BASE_URL`
   - `OPENROUTER_MODEL`
   - `CHAT_AGENT_TEMPERATURE`
   - `CHAT_AGENT_DRY_RUN` (альтернатива: `HH_AGENT_DRY_RUN`)
@@ -191,6 +215,9 @@ Chat agent пишет подробные INFO-логи на каждом эта�
   - `CHAT_AGENT_CLASSIFIER_MAX_HISTORY_MESSAGES` (дефолт: 8)
   - `CHAT_AGENT_CLASSIFIER_SYSTEM_PROMPT`
   - `CHAT_AGENT_CLASSIFIER_INSTRUCTION`
+  - `CHAT_AGENT_OPENROUTER_REQUEST_INTERVAL_SECONDS` (дефолт: 0.35)
+  - `CHAT_AGENT_OPENROUTER_MAX_RETRIES_ON_RATE_LIMIT` (дефолт: 2)
+  - `CHAT_AGENT_OPENROUTER_RATE_LIMIT_RETRY_BASE_SECONDS` (дефолт: 2.0)
 
 ### Docker Notes
 - Основной app container и LLM agent container разные по назначению.
@@ -198,6 +225,7 @@ Chat agent пишет подробные INFO-логи на каждом эта�
 - `Dockerfile.llm-agent` не включает Chromium/playwright/cron и должен оставаться легковесным.
 - Контейнер LLM-агента по умолчанию запускает `chat-agent --daemon`.
 - В `docker-compose.llm-agent.yml` используется флаг `-v` для вывода INFO-логов в контейнер.
+- Основной `Dockerfile` включает playwright/cron и устанавливает Chromium для browser-auth сценариев.
 
 ## Instructions for Agents
 1. Сначала прочитай `README.md` и `src/hh_applicant_tool/main.py`, чтобы понять runtime и список доступных операций.
