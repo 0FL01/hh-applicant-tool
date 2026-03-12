@@ -34,7 +34,10 @@ DEFAULT_CLASSIFIER_INSTRUCTION = (
     "passive_update, marketing_broadcast, system_event или irrelevant. "
     "reply ставь только если в последнем неотвеченном пакете есть прямой "
     "вопрос, screening, просьба подтвердить интерес, сообщить данные или "
-    "выполнить следующий шаг. skip ставь для автоуведомлений, брендовых "
+    "выполнить следующий шаг. Нумерованные анкеты, скрининг-опросники, "
+    "формулировки вида 'ответьте на несколько вопросов' и списки вопросов "
+    "всегда считай human_actionable с action=reply, даже если сообщение "
+    "выглядит шаблонным. skip ставь только для автоуведомлений, брендовых "
     "рассылок, thank-you сообщений без действия, системных событий и прочего "
     "шума. confidence - число от 0 до 1."
 )
@@ -47,6 +50,9 @@ class OpenRouterConfig:
     model: str = DEFAULT_OPENROUTER_MODEL
     temperature: float = 0.2
     max_completion_tokens: int = 1200
+    request_interval_seconds: float = 0.35
+    max_retries_on_rate_limit: int = 2
+    rate_limit_retry_base_seconds: float = 2.0
     reasoning_enabled: bool = True
     app_name: str = "hh-applicant-tool"
     referer: str = "https://github.com/s3rgeym/hh-applicant-tool"
@@ -108,13 +114,29 @@ def _env_or_value(
     default: Any,
     caster,
 ):
+    if arg_value is not None:
+        return caster(arg_value)
     env_value = getenv(env_name)
     if env_value is not None:
         return caster(env_value)
-    if arg_value is not None:
-        return caster(arg_value)
     if config_value is not None:
         return caster(config_value)
+    return default
+
+
+def _env_bool_or_value(
+    env_name: str,
+    arg_value: bool | None,
+    config_value: bool | None,
+    default: bool,
+) -> bool:
+    if arg_value is not None:
+        return bool(arg_value)
+    env_value = _parse_env_bool(env_name)
+    if env_value is not None:
+        return env_value
+    if config_value is not None:
+        return bool(config_value)
     return default
 
 
@@ -137,74 +159,68 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
             "OPENROUTER_API_KEY."
         )
 
-    temperature_str = getenv("CHAT_AGENT_TEMPERATURE")
-    temperature = (
-        float(temperature_str)
-        if temperature_str is not None
-        else (
-            getattr(args, "temperature", None)
-            if getattr(args, "temperature", None) is not None
-            else openrouter_cfg.get("temperature", 0.2)
-        )
+    temperature = _env_or_value(
+        "CHAT_AGENT_TEMPERATURE",
+        getattr(args, "temperature", None),
+        openrouter_cfg.get("temperature"),
+        0.2,
+        float,
     )
 
-    max_tokens_str = getenv("CHAT_AGENT_MAX_COMPLETION_TOKENS")
-    max_completion_tokens = (
-        int(max_tokens_str)
-        if max_tokens_str is not None
-        else (
-            getattr(args, "max_completion_tokens", None)
-            or openrouter_cfg.get("max_completion_tokens", 1200)
-        )
+    max_completion_tokens = _env_or_value(
+        "CHAT_AGENT_MAX_COMPLETION_TOKENS",
+        getattr(args, "max_completion_tokens", None),
+        openrouter_cfg.get("max_completion_tokens"),
+        1200,
+        int,
     )
 
-    model = (
-        getattr(args, "model", None)
-        or openrouter_cfg.get("model")
-        or getenv("OPENROUTER_MODEL")
-        or DEFAULT_OPENROUTER_MODEL
+    model = _env_or_value(
+        "OPENROUTER_MODEL",
+        getattr(args, "model", None),
+        openrouter_cfg.get("model"),
+        DEFAULT_OPENROUTER_MODEL,
+        str,
     )
 
-    base_url = (
-        getattr(args, "openrouter_base_url", None)
-        or openrouter_cfg.get("base_url")
-        or getenv("OPENROUTER_BASE_URL")
-        or DEFAULT_OPENROUTER_BASE_URL
+    base_url = _env_or_value(
+        "OPENROUTER_BASE_URL",
+        getattr(args, "openrouter_base_url", None),
+        openrouter_cfg.get("base_url"),
+        DEFAULT_OPENROUTER_BASE_URL,
+        str,
     )
 
-    period_days_str = getenv("CHAT_AGENT_PERIOD_DAYS")
-    period_days = (
-        int(period_days_str)
-        if period_days_str is not None
-        else (
-            getattr(args, "period", None)
-            if getattr(args, "period", None) is not None
-            else agent_cfg.get("period_days")
-        )
+    period_days = _env_or_value(
+        "CHAT_AGENT_PERIOD_DAYS",
+        getattr(args, "period", None),
+        agent_cfg.get("period_days"),
+        None,
+        int,
     )
 
-    max_history_str = getenv("CHAT_AGENT_MAX_HISTORY_MESSAGES")
-    max_history_messages = (
-        int(max_history_str)
-        if max_history_str is not None
-        else (
-            getattr(args, "max_history_messages", None)
-            or agent_cfg.get("max_history_messages", 12)
-        )
+    max_history_messages = _env_or_value(
+        "CHAT_AGENT_MAX_HISTORY_MESSAGES",
+        getattr(args, "max_history_messages", None),
+        agent_cfg.get("max_history_messages"),
+        12,
+        int,
     )
 
-    system_prompt = (
-        getattr(args, "system_prompt", None)
-        or agent_cfg.get("system_prompt")
-        or getenv("CHAT_AGENT_SYSTEM_PROMPT")
-        or DEFAULT_SYSTEM_PROMPT
+    system_prompt = _env_or_value(
+        "CHAT_AGENT_SYSTEM_PROMPT",
+        getattr(args, "system_prompt", None),
+        agent_cfg.get("system_prompt"),
+        DEFAULT_SYSTEM_PROMPT,
+        str,
     )
 
-    reply_instruction = (
-        getattr(args, "reply_instruction", None)
-        or agent_cfg.get("reply_instruction")
-        or getenv("CHAT_AGENT_REPLY_INSTRUCTION")
-        or DEFAULT_REPLY_INSTRUCTION
+    reply_instruction = _env_or_value(
+        "CHAT_AGENT_REPLY_INSTRUCTION",
+        getattr(args, "reply_instruction", None),
+        agent_cfg.get("reply_instruction"),
+        DEFAULT_REPLY_INSTRUCTION,
+        str,
     )
     dry_run = _parse_env_bool("CHAT_AGENT_DRY_RUN")
     if dry_run is None:
@@ -216,6 +232,27 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         model=model,
         temperature=temperature,
         max_completion_tokens=max_completion_tokens,
+        request_interval_seconds=_env_or_value(
+            "CHAT_AGENT_OPENROUTER_REQUEST_INTERVAL_SECONDS",
+            None,
+            openrouter_cfg.get("request_interval_seconds"),
+            0.35,
+            float,
+        ),
+        max_retries_on_rate_limit=_env_or_value(
+            "CHAT_AGENT_OPENROUTER_MAX_RETRIES_ON_RATE_LIMIT",
+            None,
+            openrouter_cfg.get("max_retries_on_rate_limit"),
+            2,
+            int,
+        ),
+        rate_limit_retry_base_seconds=_env_or_value(
+            "CHAT_AGENT_OPENROUTER_RATE_LIMIT_RETRY_BASE_SECONDS",
+            None,
+            openrouter_cfg.get("rate_limit_retry_base_seconds"),
+            2.0,
+            float,
+        ),
         reasoning_enabled=getattr(args, "reasoning", None)
         if getattr(args, "reasoning", None) is not None
         else openrouter_cfg.get("reasoning_enabled", True),
@@ -226,42 +263,35 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         ),
     )
 
-    classifier_enabled = _parse_env_bool("CHAT_AGENT_CLASSIFIER_ENABLED")
-    if classifier_enabled is None:
-        classifier_enabled = (
-            getattr(args, "classifier_enabled", None)
-            if getattr(args, "classifier_enabled", None) is not None
-            else classifier_cfg.get("enabled", True)
-        )
-
-    classifier_temperature_str = getenv("CHAT_AGENT_CLASSIFIER_TEMPERATURE")
-    classifier_temperature = (
-        float(classifier_temperature_str)
-        if classifier_temperature_str is not None
-        else (
-            getattr(args, "classifier_temperature", None)
-            if getattr(args, "classifier_temperature", None) is not None
-            else classifier_cfg.get("temperature", 0.0)
-        )
+    classifier_enabled = _env_bool_or_value(
+        "CHAT_AGENT_CLASSIFIER_ENABLED",
+        getattr(args, "classifier_enabled", None),
+        classifier_cfg.get("enabled"),
+        True,
     )
 
-    classifier_max_tokens_str = getenv(
-        "CHAT_AGENT_CLASSIFIER_MAX_COMPLETION_TOKENS"
-    )
-    classifier_max_completion_tokens = (
-        int(classifier_max_tokens_str)
-        if classifier_max_tokens_str is not None
-        else (
-            getattr(args, "classifier_max_completion_tokens", None)
-            or classifier_cfg.get("max_completion_tokens", 256)
-        )
+    classifier_temperature = _env_or_value(
+        "CHAT_AGENT_CLASSIFIER_TEMPERATURE",
+        getattr(args, "classifier_temperature", None),
+        classifier_cfg.get("temperature"),
+        0.0,
+        float,
     )
 
-    classifier_model = (
-        getenv("CHAT_AGENT_CLASSIFIER_MODEL")
-        or getattr(args, "classifier_model", None)
-        or classifier_cfg.get("model")
-        or DEFAULT_CLASSIFIER_MODEL
+    classifier_max_completion_tokens = _env_or_value(
+        "CHAT_AGENT_CLASSIFIER_MAX_COMPLETION_TOKENS",
+        getattr(args, "classifier_max_completion_tokens", None),
+        classifier_cfg.get("max_completion_tokens"),
+        256,
+        int,
+    )
+
+    classifier_model = _env_or_value(
+        "CHAT_AGENT_CLASSIFIER_MODEL",
+        getattr(args, "classifier_model", None),
+        classifier_cfg.get("model"),
+        DEFAULT_CLASSIFIER_MODEL,
+        str,
     )
 
     classifier_max_history_messages = _env_or_value(
@@ -272,27 +302,28 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         int,
     )
 
-    classifier_system_prompt = (
-        getenv("CHAT_AGENT_CLASSIFIER_SYSTEM_PROMPT")
-        or getattr(args, "classifier_system_prompt", None)
-        or classifier_cfg.get("system_prompt")
-        or DEFAULT_CLASSIFIER_SYSTEM_PROMPT
+    classifier_system_prompt = _env_or_value(
+        "CHAT_AGENT_CLASSIFIER_SYSTEM_PROMPT",
+        getattr(args, "classifier_system_prompt", None),
+        classifier_cfg.get("system_prompt"),
+        DEFAULT_CLASSIFIER_SYSTEM_PROMPT,
+        str,
     )
 
-    classifier_instruction = (
-        getenv("CHAT_AGENT_CLASSIFIER_INSTRUCTION")
-        or getattr(args, "classifier_instruction", None)
-        or classifier_cfg.get("instruction")
-        or DEFAULT_CLASSIFIER_INSTRUCTION
+    classifier_instruction = _env_or_value(
+        "CHAT_AGENT_CLASSIFIER_INSTRUCTION",
+        getattr(args, "classifier_instruction", None),
+        classifier_cfg.get("instruction"),
+        DEFAULT_CLASSIFIER_INSTRUCTION,
+        str,
     )
 
-    classifier_reasoning = _parse_env_bool("CHAT_AGENT_CLASSIFIER_REASONING")
-    if classifier_reasoning is None:
-        classifier_reasoning = (
-            getattr(args, "classifier_reasoning", None)
-            if getattr(args, "classifier_reasoning", None) is not None
-            else classifier_cfg.get("reasoning_enabled", False)
-        )
+    classifier_reasoning = _env_bool_or_value(
+        "CHAT_AGENT_CLASSIFIER_REASONING",
+        getattr(args, "classifier_reasoning", None),
+        classifier_cfg.get("reasoning_enabled"),
+        False,
+    )
 
     classifier = ClassifierConfig(
         enabled=bool(classifier_enabled),
@@ -302,6 +333,9 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
             model=classifier_model,
             temperature=classifier_temperature,
             max_completion_tokens=classifier_max_completion_tokens,
+            request_interval_seconds=openrouter.request_interval_seconds,
+            max_retries_on_rate_limit=openrouter.max_retries_on_rate_limit,
+            rate_limit_retry_base_seconds=openrouter.rate_limit_retry_base_seconds,
             reasoning_enabled=bool(classifier_reasoning),
             app_name=openrouter.app_name,
             referer=openrouter.referer,
@@ -311,13 +345,12 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         max_history_messages=classifier_max_history_messages,
     )
 
-    quiet_hours_enabled = _parse_env_bool("CHAT_AGENT_QUIET_HOURS")
-    if quiet_hours_enabled is None:
-        quiet_hours_enabled = (
-            getattr(args, "quiet_hours", None)
-            if getattr(args, "quiet_hours", None) is not None
-            else agent_cfg.get("quiet_hours_enabled", True)
-        )
+    quiet_hours_enabled = _env_bool_or_value(
+        "CHAT_AGENT_QUIET_HOURS",
+        getattr(args, "quiet_hours", None),
+        agent_cfg.get("quiet_hours_enabled"),
+        True,
+    )
 
     timing = AgentTimingConfig(
         sleep_min_minutes=_env_or_value(

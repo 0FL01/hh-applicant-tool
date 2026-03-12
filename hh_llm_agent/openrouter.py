@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +11,7 @@ from openai import OpenAI
 from .config import OpenRouterConfig
 
 logger = logging.getLogger(__package__)
+_LAST_REQUEST_AT: dict[str, float] = {}
 
 
 class OpenRouterError(Exception):
@@ -132,7 +134,55 @@ class OpenRouterChatClient:
         return self.PROVIDER_ROUTING_ERROR in message
 
     def _send_request(self, request: dict[str, Any]) -> Any:
-        return self.client.chat.completions.create(**request)
+        attempts = max(1, int(self.config.max_retries_on_rate_limit) + 1)
+        for attempt in range(attempts):
+            self._rate_limit_wait()
+            try:
+                response = self.client.chat.completions.create(**request)
+                self._mark_request_sent()
+                return response
+            except Exception as ex:
+                self._mark_request_sent()
+                if not self._is_rate_limit_error(ex) or attempt >= attempts - 1:
+                    raise
+                delay = float(self.config.rate_limit_retry_base_seconds) * (
+                    attempt + 1
+                )
+                logger.warning(
+                    "OpenRouter rate limited for model %s; retry %s/%s in %.1fs",
+                    self.config.model,
+                    attempt + 1,
+                    attempts - 1,
+                    delay,
+                )
+                time.sleep(delay)
+        raise RuntimeError("Unreachable")
+
+    def _is_rate_limit_error(self, ex: Exception) -> bool:
+        if getattr(ex, "status_code", None) == 429:
+            return True
+        body = getattr(ex, "body", None)
+        if isinstance(body, dict):
+            error = body.get("error")
+            if isinstance(error, dict) and error.get("code") == 429:
+                return True
+        return False
+
+    def _rate_limit_wait(self) -> None:
+        interval = float(self.config.request_interval_seconds)
+        if interval <= 0:
+            return
+        key = self.config.api_key
+        last_request_at = _LAST_REQUEST_AT.get(key)
+        if last_request_at is None:
+            return
+        elapsed = time.monotonic() - last_request_at
+        wait_for = interval - elapsed
+        if wait_for > 0:
+            time.sleep(wait_for)
+
+    def _mark_request_sent(self) -> None:
+        _LAST_REQUEST_AT[self.config.api_key] = time.monotonic()
 
     def _raise_request_error(self, ex: Exception) -> None:
         raise OpenRouterError(f"OpenRouter request failed: {ex}") from ex

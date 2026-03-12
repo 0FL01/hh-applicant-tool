@@ -71,3 +71,26 @@ def test_load_agent_config_allows_classifier_env_override(monkeypatch):
 
     assert config.classifier is not None
     assert config.classifier.openrouter.model == "custom/classifier"
+
+
+def test_load_agent_config_cli_disables_classifier_over_env(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "token")
+    monkeypatch.setenv("CHAT_AGENT_CLASSIFIER_ENABLED", "true")
+
+    config = load_agent_config(make_tool(), make_args(classifier_enabled=False))
+
+    assert config.classifier is not None
+    assert config.classifier.enabled is False
+
+
+def test_load_agent_config_cli_classifier_model_overrides_env(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "token")
+    monkeypatch.setenv("CHAT_AGENT_CLASSIFIER_MODEL", "custom/classifier")
+
+    config = load_agent_config(
+        make_tool(),
+        make_args(classifier_model="cli/classifier"),
+    )
+
+    assert config.classifier is not None
+    assert config.classifier.openrouter.model == "cli/classifier"

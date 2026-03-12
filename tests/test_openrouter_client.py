@@ -91,6 +91,9 @@ def test_complete_json_parses_first_try():
                 "model": "google/gemini-3.1-flash-lite-preview",
                 "temperature": 0.2,
                 "max_completion_tokens": 100,
+                "request_interval_seconds": 0.0,
+                "max_retries_on_rate_limit": 2,
+                "rate_limit_retry_base_seconds": 0.0,
                 "reasoning_enabled": True,
             },
         )(),
@@ -139,6 +142,9 @@ def test_complete_json_raises_for_invalid_structured_json():
                 "model": "google/gemini-3.1-flash-lite-preview",
                 "temperature": 0.2,
                 "max_completion_tokens": 100,
+                "request_interval_seconds": 0.0,
+                "max_retries_on_rate_limit": 2,
+                "rate_limit_retry_base_seconds": 0.0,
                 "reasoning_enabled": True,
             },
         )(),
@@ -183,6 +189,9 @@ def test_complete_json_retries_without_require_parameters_on_provider_404():
                 "model": "google/gemma-3-27b-it",
                 "temperature": 0.0,
                 "max_completion_tokens": 100,
+                "request_interval_seconds": 0.0,
+                "max_retries_on_rate_limit": 2,
+                "rate_limit_retry_base_seconds": 0.0,
                 "reasoning_enabled": False,
             },
         )(),
@@ -205,3 +214,46 @@ def test_complete_json_retries_without_require_parameters_on_provider_404():
         "reasoning": {"enabled": False},
         "plugins": [{"id": "response-healing"}],
     }
+
+
+def test_complete_json_retries_on_rate_limit_then_succeeds():
+    client = FakeClient(
+        [
+            FakeOpenRouterError(
+                "Error code: 429",
+                status_code=429,
+                body={"error": {"message": "rate limited", "code": 429}},
+            ),
+            FakeResponse(
+                '{"action":"reply","reply_text":"Здравствуйте!","reason":"need_reply"}'
+            ),
+        ]
+    )
+    chat = OpenRouterChatClient(
+        config=type(
+            "Cfg",
+            (),
+            {
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "token",
+                "referer": "https://example.com",
+                "app_name": "test",
+                "model": "google/gemini-3.1-flash-lite-preview",
+                "temperature": 0.2,
+                "max_completion_tokens": 100,
+                "request_interval_seconds": 0.0,
+                "max_retries_on_rate_limit": 1,
+                "rate_limit_retry_base_seconds": 0.0,
+                "reasoning_enabled": True,
+            },
+        )(),
+        client=client,
+    )
+
+    result = chat.complete_json(
+        [{"role": "user", "content": "hi"}],
+        schema=TEST_SCHEMA,
+    )
+
+    assert result.parsed["action"] == "reply"
+    assert len(client.chat.completions.calls) == 2
