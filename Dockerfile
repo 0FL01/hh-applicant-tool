@@ -1,5 +1,7 @@
 FROM python:3.13-slim
 
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 # Системные зависимости
 RUN apt-get update && apt-get install -y --no-install-recommends \
   gcc \
@@ -28,9 +30,10 @@ RUN mkdir -p /app/hh_llm_agent && echo "# Placeholder for Poetry" > /app/hh_llm_
 # И ставим его (без -e, чтобы не требовался hh_llm_agent)
 RUN pip install --no-cache-dir '.[playwright,pillow]'
 
-# Ставим зависимости хромиума и сам хромиум пользователю docker
-RUN playwright install-deps chromium && \
-  su docker -c "playwright install chromium"
+# Ставим зависимости хромиума и сам браузер в общий кэш
+RUN mkdir -p "$PLAYWRIGHT_BROWSERS_PATH" && \
+  playwright install-deps chromium && \
+  playwright install chromium
 
 # Очистка кеша пакетов для уменьшения веса контейнера
 RUN rm -rf /var/lib/apt/lists/*
