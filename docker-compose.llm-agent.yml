@@ -24,3 +24,24 @@ services:
       # - CHAT_AGENT_DRY_RUN=true
       # Пауза между циклами daemon-режима
       - CHAT_AGENT_POLL_INTERVAL=${CHAT_AGENT_POLL_INTERVAL:-60}
+
+  tg_contact_collector:
+    container_name: hh_tg_contact_collector
+    image: hh_llm_agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.llm-agent
+    volumes:
+      - .:/app
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["-v", "tg-contact-collector"]
+    environment:
+      - CONFIG_DIR=/app/config
+      - TERM=${TERM}
+      - TELEGRAM_COLLECTOR_LISTEN_HOST=${TELEGRAM_COLLECTOR_LISTEN_HOST:-0.0.0.0}
+      - TELEGRAM_COLLECTOR_LISTEN_PORT=${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}
+    ports:
+      - "${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}:${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}"

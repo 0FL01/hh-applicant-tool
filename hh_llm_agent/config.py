@@ -101,6 +101,25 @@ class AgentConfig:
     timing: AgentTimingConfig = AgentTimingConfig()
 
 
+@dataclass(frozen=True)
+class TelegramBotConfig:
+    token: str
+    target_chat_id: int
+    base_url: str = "https://api.telegram.org"
+    timeout_seconds: float = 10.0
+    verify_ssl: bool = True
+
+
+@dataclass(frozen=True)
+class TelegramCollectorConfig:
+    bot: TelegramBotConfig
+    listen_host: str = "0.0.0.0"
+    listen_port: int = 8787
+    webhook_secret: str | None = None
+    webhook_secret_header: str = "X-Webhook-Secret"
+    db_path: str = "tg_collector.sqlite3"
+
+
 def _parse_env_bool(name: str) -> bool | None:
     value = getenv(name)
     if value is None:
@@ -540,4 +559,102 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         else agent_cfg.get("skip_blacklisted", True),
         force=getattr(args, "force", False),
         timing=timing,
+    )
+
+
+def load_telegram_collector_config(
+    tool: Any,
+    args: Any,
+) -> TelegramCollectorConfig:
+    config = tool.config
+    collector_cfg = config.get("telegram_collector", {}) or {}
+
+    bot_token = _env_or_value(
+        "TELEGRAM_COLLECTOR_BOT_TOKEN",
+        getattr(args, "bot_token", None),
+        collector_cfg.get("bot_token"),
+        None,
+        lambda value: str(value).strip() or None,
+    )
+    if not bot_token:
+        raise ValueError(
+            "Telegram bot token is not configured. Use telegram_collector.bot_token "
+            "or TELEGRAM_COLLECTOR_BOT_TOKEN."
+        )
+
+    target_chat_id = _env_or_value(
+        "TELEGRAM_COLLECTOR_TARGET_CHAT_ID",
+        getattr(args, "target_chat_id", None),
+        collector_cfg.get("target_chat_id"),
+        None,
+        int,
+    )
+    if target_chat_id is None:
+        raise ValueError(
+            "Telegram target chat id is not configured. Use "
+            "telegram_collector.target_chat_id or TELEGRAM_COLLECTOR_TARGET_CHAT_ID."
+        )
+
+    db_path = _env_or_value(
+        "TELEGRAM_COLLECTOR_DB_PATH",
+        getattr(args, "db_path", None),
+        collector_cfg.get("db_path"),
+        str(tool.config_path / "tg_collector.sqlite3"),
+        str,
+    )
+
+    return TelegramCollectorConfig(
+        bot=TelegramBotConfig(
+            token=bot_token,
+            target_chat_id=int(target_chat_id),
+            base_url=_env_or_value(
+                "TELEGRAM_COLLECTOR_BOT_API_BASE_URL",
+                getattr(args, "bot_api_base_url", None),
+                collector_cfg.get("bot_api_base_url"),
+                "https://api.telegram.org",
+                str,
+            ),
+            timeout_seconds=_env_or_value(
+                "TELEGRAM_COLLECTOR_TIMEOUT_SECONDS",
+                getattr(args, "timeout_seconds", None),
+                collector_cfg.get("timeout_seconds"),
+                10.0,
+                float,
+            ),
+            verify_ssl=_env_bool_or_value(
+                "TELEGRAM_COLLECTOR_VERIFY_SSL",
+                getattr(args, "verify_ssl", None),
+                collector_cfg.get("verify_ssl"),
+                True,
+            ),
+        ),
+        listen_host=_env_or_value(
+            "TELEGRAM_COLLECTOR_LISTEN_HOST",
+            getattr(args, "host", None),
+            collector_cfg.get("listen_host"),
+            "0.0.0.0",
+            str,
+        ),
+        listen_port=_env_or_value(
+            "TELEGRAM_COLLECTOR_LISTEN_PORT",
+            getattr(args, "port", None),
+            collector_cfg.get("listen_port"),
+            8787,
+            int,
+        ),
+        webhook_secret=_env_or_value(
+            "TELEGRAM_COLLECTOR_WEBHOOK_SECRET",
+            getattr(args, "webhook_secret", None),
+            collector_cfg.get("webhook_secret"),
+            None,
+            lambda value: str(value) if value is not None else None,
+        ),
+        webhook_secret_header=_env_or_value(
+            "TELEGRAM_COLLECTOR_WEBHOOK_SECRET_HEADER",
+            getattr(args, "webhook_secret_header", None),
+            collector_cfg.get("webhook_secret_header"),
+            "X-Webhook-Secret",
+            str,
+        ),
+        db_path=db_path,
     )

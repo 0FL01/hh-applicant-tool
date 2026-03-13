@@ -36,9 +36,12 @@ The default branch is `main`.
   - `hh_llm_agent/gateway.py` - абстракционный слой над HH API для агента
   - `hh_llm_agent/service.py` - основной workflow автоответов
   - `hh_llm_agent/openrouter.py` - клиент OpenRouter с structured outputs и rate limiting
-  - `hh_llm_agent/timing.py` - политика сна агента, quiet hours, jitter
-  - `hh_llm_agent/contact_extract.py` - экстрактор контактов из текста (email, telegram, phone, URL)
-  - `hh_llm_agent/webhook.py` - HTTP клиент для отправки webhook payload
+ - `hh_llm_agent/timing.py` - политика сна агента, quiet hours, jitter
+   - `hh_llm_agent/contact_extract.py` - экстрактор контактов из текста (email, telegram, phone, URL)
+   - `hh_llm_agent/webhook.py` - HTTP клиент для отправки webhook payload
+   - `hh_llm_agent/tg_bot_client.py` - минимальный клиент Telegram Bot API для отправки сообщений
+   - `hh_llm_agent/tg_collector_store.py` - отдельное SQLite-хранилище лидов для Telegram коллектора
+   - `hh_llm_agent/tg_contact_collector.py` - легкий HTTP-сервис приема recruiter_contact_offer вебхуков
 - `tests/` - тесты (pytest)
 - `docs/hhapi/openapi.yml` - архивная OpenAPI-спека hh API
 - `config/` - runtime-данные профилей (tokens/cookies/log/db), локальные и не для коммита секретов
@@ -55,6 +58,8 @@ The default branch is `main`.
 - **ChatAgentService (`hh_llm_agent/service.py`)**: основной workflow автоответов: batch-run, quiet hours, debounce свежих сообщений работодателя, single-reply/QA-series планирование, outbox и audit в SQLite. Логирует run lifecycle, negotiation start/outcome и LLM решения на INFO.
 - **OpenRouterChatClient (`hh_llm_agent/openrouter.py`)**: клиент OpenRouter через SDK `openai` со structured outputs (`response_format=json_schema`), `require_parameters=true`, reasoning и `response-healing` plugin, rate limiting и retry.
 - **TimingPolicy (`hh_llm_agent/timing.py`)**: политика сна агента, quiet hours по таймзоне, jitter между циклами и сообщениями.
+- **TelegramContactCollectorService (`hh_llm_agent/tg_contact_collector.py`)**: легкий HTTP-приемник webhook `recruiter_contact_offer`, сохраняет лид в отдельную SQLite и пересылает уведомление через Telegram Bot API. Поддерживает idempotency, дедупликацию и повторную доставку после сбоев Telegram.
+- **Telegram Collector Operation (`src/hh_applicant_tool/operations/tg_contact_collector.py`)**: CLI-команда для запуска HTTP-сервера коллектора (`hh-applicant-tool tg-contact-collector`).
 
 ## Architecture & Rules
 
@@ -234,15 +239,27 @@ Chat agent пишет подробные INFO-логи на каждом эта�
   - `CHAT_AGENT_WEBHOOK_URL` - URL для webhook
   - `CHAT_AGENT_WEBHOOK_TIMEOUT_SECONDS` (дефолт: 10)
   - `CHAT_AGENT_WEBHOOK_SECRET` - секрет для подписи
-  - `CHAT_AGENT_WEBHOOK_SECRET_HEADER` (дефолт: `X-Webhook-Secret`)
-  - `CHAT_AGENT_WEBHOOK_MAX_ATTEMPTS` (дефолт: 3)
-  - `CHAT_AGENT_WEBHOOK_RETRY_BASE_SECONDS` (дефолт: 30)
-
+   - `CHAT_AGENT_WEBHOOK_SECRET_HEADER` (дефолт: `X-Webhook-Secret`)
+   - `CHAT_AGENT_WEBHOOK_MAX_ATTEMPTS` (дефолт: 3)
+   - `CHAT_AGENT_WEBHOOK_RETRY_BASE_SECONDS` (дефолт: 30)
+- Telegram collector env vars:
+   - `TELEGRAM_COLLECTOR_BOT_TOKEN` (обязателен) — токен Telegram Bot API
+   - `TELEGRAM_COLLECTOR_TARGET_CHAT_ID` (обязателен) — куда слать уведомления
+   - `TELEGRAM_COLLECTOR_LISTEN_HOST` (дефолт: `0.0.0.0`) — адрес для bind
+   - `TELEGRAM_COLLECTOR_LISTEN_PORT` (дефолт: `8787`) — порт HTTP-сервера
+   - `TELEGRAM_COLLECTOR_WEBHOOK_SECRET` — секрет для проверки webhook
+   - `TELEGRAM_COLLECTOR_WEBHOOK_SECRET_HEADER` (дефолт: `X-Webhook-Secret`)
+   - `TELEGRAM_COLLECTOR_DB_PATH` — путь до SQLite-файла лидов (дефолт: `config/<profile>/tg_collector.sqlite3`)
+   - `TELEGRAM_COLLECTOR_TIMEOUT_SECONDS` (дефолт: `10`)
+   - `TELEGRAM_COLLECTOR_VERIFY_SSL` (дефолт: `true`)
+   - `TELEGRAM_COLLECTOR_BOT_API_BASE_URL` (дефолт: `https://api.telegram.org`)
+ 
 ### Docker Notes
 - Основной app container и LLM agent container разные по назначению.
-- `docker-compose.llm-agent.yml` запускает только daemon-сервис `llm_agent`.
+- `docker-compose.llm-agent.yml` запускает два сервиса: `llm_agent` (daemon-режим чат-агента) и `tg_contact_collector` (webhook-приемник).
 - `Dockerfile.llm-agent` не включает Chromium/playwright/cron и должен оставаться легковесным.
 - Контейнер LLM-агента по умолчанию запускает `chat-agent --daemon`.
+- Контейнер коллектора запускает `tg-contact-collector` и слушает webhook на порту `8787` по умолчанию.
 - В `docker-compose.llm-agent.yml` используется флаг `-v` для вывода INFO-логов в контейнер.
 - Основной `Dockerfile` включает playwright/cron и устанавливает Chromium для browser-auth сценариев.
 

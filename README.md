@@ -372,9 +372,67 @@ docker compose -f docker-compose.llm-agent.yml up -d --build llm_agent
 - Для screening-ботов агент умеет планировать Q/A-серию из 2-3 коротких сообщений с jitter между частями
 - Модель по умолчанию: `google/gemini-3.1-flash-lite-preview`
 - При использовании `run --rm` с другими командами (например, `--dry-run`) стандартная daemon-команда переопределяется
-
+-
+## Запуск Telegram collector через Docker
+-
+Легкий HTTP-приемник webhook `recruiter_contact_offer`, который сохраняет лид в отдельную SQLite и пересылает уведомление через Telegram Bot API. Копит контакты рекрутеров и пересылает их вам в Telegram для самостоятельного начала диалога.
+-
+### Сборка образа
+-
+```sh
+docker compose -f docker-compose.llm-agent.yml build
+```
+-
+### Настройка
+-
+В `.env` обязательно укажите:
+-
+```sh
+TELEGRAM_COLLECTOR_BOT_TOKEN=123456:telegram-bot-token
+TELEGRAM_COLLECTOR_TARGET_CHAT_ID=123456789
+TELEGRAM_COLLECTOR_WEBHOOK_SECRET=supersecret
+```
+-
+### Запуск коллектора
+-
+```sh
+docker compose -f docker-compose.llm-agent.yml up -d tg_contact_collector
+```
+-
+Просмотр логов:
+-
+```sh
+docker compose -f docker-compose.llm-agent.yml logs -f tg_contact_collector
+```
+-
+Остановка:
+-
+```sh
+docker compose -f docker-compose.llm-agent.yml down
+```
+-
+### Связка с chat-agent
+-
+Чтобы chat-agent отправлял `recruiter_contact_offer` webhook на коллектор, укажите в `.env`:
+-
+```sh
+CHAT_AGENT_WEBHOOK_URL=http://tg_contact_collector:8787/webhooks/hh/recruiter-contact-offer
+CHAT_AGENT_WEBHOOK_ENABLED=true
+CHAT_AGENT_WEBHOOK_SECRET=supersecret
+```
+-
+### Особенности
+-
+- Контейнер работает от пользователя `llmagent` (UID/GID 1000 по умолчанию)
+- Коллектор слушает webhook на порту `8787` по умолчанию
+- Путь к SQLite-файлу лидов: `config/<profile>/tg_collector.sqlite3`
+- Поддерживает idempotency по `X-Idempotency-Key` и дедупликацию в SQLite
+- При сбоях Telegram Bot API возвращает 5xx, и chat-agent сам ретраит доставку
+- Уведомление в Telegram — простое текстовое сообщение без markdown/HTML для надежности
+- Бот должен быть запущен командой `/start` у него в личку, прежде чем сможет отправлять сообщения
+-
 ---
-
+ 
 ## Стандартная установка
 
 ### Установка утилиты
@@ -584,7 +642,8 @@ $ hh-applicant-tool reply-employers
 
 # Запустить LLM-агента для автоответов в чатах
 $ hh-applicant-tool chat-agent --dry-run
-
+# Запустить Telegram collector для приема recruiter_contact_offer webhook
+$ hh-applicant-tool tg-contact-collector
 # Просмотр лога в реальном времени
 $ hh-applicant-tool log -f
 
@@ -663,6 +722,7 @@ $ hh-applicant-tool settings auth.username 'user@example.com'
 | **apply-vacancies**, **apply**     | Откликнуться на подходящие вакансии. Если указана строка для поиска (`--search`), то поиск будет произведен по вакансиям, иначе по списку рекомендованных вакансий. Лимит = 200 в день. На HH есть спам-фильтры, так что лучше не рассылайте отклики со ссылками, иначе рискуете попасть в теневой бан. |
 | **reply-employers**, **reply**     | Ответить во все чаты с работодателями, где нет ответа либо не прочитали ваш предыдущий ответ                                                                                                                               |
 | **chat-agent**, **ai-agent**       | LLM-агент для автоматического ответа в чатах работодателей через OpenRouter                                                                                                                                               |
+| **tg-contact-collector**, **tg-collector** | Легкий HTTP-приемник recruiter_contact_offer webhook и форвардер уведомлений в Telegram Bot API. Копит контакты рекрутеров в SQLite и пересылает вам. |
 | **clear-negotiations**             | Отмена откликов                                                                                                                                                                                                            |
 | **call-api**, **api**              | Вызов произвольного метода API с выводом результата.                                                                                                                                                                       |
 | **refresh-token**, **refresh**     | Обновляет access_token.                                                                                                                                                                                                    |

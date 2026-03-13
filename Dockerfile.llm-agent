@@ -30,6 +30,9 @@ RUN mkdir -p /app/config && \
 # Переключаемся на пользователя
 USER llmagent
 
+# Один и тот же образ используется и для chat-agent, и для webhook-коллектора
+EXPOSE 8787
+
 # По умолчанию запускаем daemon-режим агента
 ENTRYPOINT ["python", "-m", "hh_applicant_tool"]
 CMD ["chat-agent", "--daemon"]
