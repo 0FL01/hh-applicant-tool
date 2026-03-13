@@ -44,6 +44,7 @@ class WebhookClient:
                 json=payload,
                 headers=headers,
                 timeout=self.config.timeout_seconds,
+                verify=self.config.verify_ssl,
             )
             response.raise_for_status()
         except requests.RequestException as ex:

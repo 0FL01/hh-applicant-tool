@@ -33,6 +33,7 @@ def make_args(**overrides):
         "webhook_enabled": None,
         "webhook_url": None,
         "webhook_timeout_seconds": None,
+        "webhook_verify_ssl": None,
         "webhook_secret": None,
         "webhook_secret_header": None,
         "webhook_max_attempts": None,
@@ -112,7 +113,21 @@ def test_load_agent_config_builds_webhook_from_env(monkeypatch):
 
     assert config.webhook is not None
     assert config.webhook.url == "https://example.com/hook"
+    assert config.webhook.verify_ssl is True
     assert config.webhook.secret == "secret"
+
+
+def test_load_agent_config_allows_disabling_webhook_ssl_verification(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "token")
+    monkeypatch.setenv("CHAT_AGENT_WEBHOOK_URL", "https://example.com/hook")
+    monkeypatch.setenv("CHAT_AGENT_WEBHOOK_VERIFY_SSL", "false")
+
+    config = load_agent_config(make_tool(), make_args())
+
+    assert config.webhook is not None
+    assert config.webhook.verify_ssl is False
 
 
 def test_load_agent_config_rejects_enabled_webhook_without_url(monkeypatch):

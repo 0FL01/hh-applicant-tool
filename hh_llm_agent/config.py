@@ -76,6 +76,7 @@ class WebhookConfig:
     url: str
     enabled: bool = True
     timeout_seconds: float = 10.0
+    verify_ssl: bool = True
     secret: str | None = None
     secret_header: str = "X-Webhook-Secret"
     max_attempts: int = 3
@@ -390,6 +391,12 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
                 webhook_cfg.get("timeout_seconds"),
                 10.0,
                 float,
+            ),
+            verify_ssl=_env_bool_or_value(
+                "CHAT_AGENT_WEBHOOK_VERIFY_SSL",
+                getattr(args, "webhook_verify_ssl", None),
+                webhook_cfg.get("verify_ssl"),
+                True,
             ),
             secret=_env_or_value(
                 "CHAT_AGENT_WEBHOOK_SECRET",
