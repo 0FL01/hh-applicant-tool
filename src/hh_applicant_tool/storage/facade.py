@@ -14,6 +14,7 @@ from .repositories.negotiations import NegotiationRepository
 from .repositories.resumes import ResumesRepository
 from .repositories.settings import SettingsRepository
 from .repositories.vacancies import VacanciesRepository
+from .repositories.vacancy_response_dedup import VacancyResponseDedupRepository
 from .utils import init_db
 
 
@@ -34,3 +35,4 @@ class StorageFacade:
         self.settings = SettingsRepository(conn)
         self.vacancies = VacanciesRepository(conn)
         self.vacancy_contacts = VacancyContactsRepository(conn)
+        self.vacancy_response_dedup = VacancyResponseDedupRepository(conn)

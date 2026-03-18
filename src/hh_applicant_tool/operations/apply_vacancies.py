@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import logging
@@ -80,6 +81,7 @@ class Namespace(BaseNamespace):
     excluded_filter: str | None
     max_responses: int
     send_email: bool
+    dedupe_vacancies: bool
 
 
 class Operation(BaseOperation):
@@ -156,6 +158,12 @@ class Operation(BaseOperation):
         parser.add_argument(
             "--dry-run",
             help="Не отправлять отклики, а только выводить информацию",
+            action=argparse.BooleanOptionalAction,
+        )
+        parser.add_argument(
+            "--dedupe-vacancies",
+            help="Пропускать вакансии-дубли с одинаковыми названием и описанием",
+            default=True,
             action=argparse.BooleanOptionalAction,
         )
 
@@ -359,6 +367,7 @@ class Operation(BaseOperation):
         self.currency = args.currency
         self.date_from = args.date_from
         self.date_to = args.date_to
+        self.dedupe_vacancies = args.dedupe_vacancies
         self.dry_run = args.dry_run
         self.employer_id = args.employer_id
         self.employment = args.employment
@@ -396,6 +405,7 @@ class Operation(BaseOperation):
         self.sort_point_lng = args.sort_point_lng
         self.top_lat = args.top_lat
         self.total_pages = args.total_pages
+        self._vacancy_description_cache: dict[str, str] = {}
         self.openai_chat = (
             tool.get_openai_chat(args.first_prompt) if args.use_ai else None
         )
@@ -465,10 +475,22 @@ class Operation(BaseOperation):
         do_apply = True
         storage = self.tool.storage
         site_emails = {}
+        vacancies = list(self._get_vacancies(resume_id=resume["id"]))
+        known_dedupe_vacancy_ids = self._load_known_dedupe_vacancy_ids(
+            resume_id=resume["id"]
+        )
 
-        for vacancy in self._get_vacancies(resume_id=resume["id"]):
+        if self.dedupe_vacancies:
+            self._seed_dedupe_from_existing_responses(
+                resume_id=resume["id"],
+                vacancies=vacancies,
+                known_dedupe_vacancy_ids=known_dedupe_vacancy_ids,
+            )
+
+        for vacancy in vacancies:
             try:
                 employer = vacancy.get("employer", {})
+                employer_id = employer.get("id")
 
                 message_placeholders = {
                     "vacancy_name": vacancy.get("name", ""),
@@ -499,6 +521,8 @@ class Operation(BaseOperation):
                 vacancy_id = vacancy["id"]
                 relations = vacancy.get("relations", [])
 
+                dedupe_key = self._build_vacancy_dedupe_key(vacancy)
+
                 if relations:
                     logger.debug(
                         "Пропускаем вакансию с откликом: %s",
@@ -510,6 +534,23 @@ class Operation(BaseOperation):
                             vacancy["alternate_url"],
                         )
                         print("⛔ Пришел отказ от", vacancy["alternate_url"])
+
+                    self._remember_vacancy_dedupe(
+                        resume_id=resume["id"],
+                        vacancy=vacancy,
+                        dedupe_key=dedupe_key,
+                        known_dedupe_vacancy_ids=known_dedupe_vacancy_ids,
+                        persist=not self.dry_run,
+                    )
+                    continue
+
+                if dedupe_key and dedupe_key in known_dedupe_vacancy_ids:
+                    logger.info(
+                        "Пропускаем дубликат вакансии: %s (resume_id=%s, canonical_vacancy_id=%s)",
+                        vacancy["alternate_url"],
+                        resume["id"],
+                        known_dedupe_vacancy_ids[dedupe_key],
+                    )
                     continue
 
                 if vacancy.get("archived"):
@@ -546,11 +587,11 @@ class Operation(BaseOperation):
                     continue
 
                 # Перед откликом выгружаем профиль компании
-                employer_id = employer.get("id")
                 if employer_id and employer_id not in seen_employers:
                     employer_profile: datatypes.Employer = self.api_client.get(
                         f"/employers/{employer_id}"
                     )
+                    seen_employers.add(employer_id)
 
                     try:
                         storage.employers.save(employer_profile)
@@ -635,6 +676,8 @@ class Operation(BaseOperation):
                     vacancy["alternate_url"],
                 )
 
+                should_remember_dedupe = False
+
                 if vacancy.get("has_test"):
                     logger.debug(
                         "Решаем тест: %s",
@@ -653,6 +696,7 @@ class Operation(BaseOperation):
                                     "📨 Отправили отклик на вакансию с тестом",
                                     vacancy["alternate_url"],
                                 )
+                                should_remember_dedupe = True
                             else:
                                 err = result.get("error")
 
@@ -663,6 +707,8 @@ class Operation(BaseOperation):
                                     logger.error(
                                         f"Произошла ошибка при отклике на вакансию с тестом: {vacancy['alternate_url']} - {err}"
                                     )
+                        else:
+                            should_remember_dedupe = True
                     except Exception as ex:
                         logger.error(f"Произошла непредвиденная ошибка: {ex}")
                         continue
@@ -685,11 +731,23 @@ class Operation(BaseOperation):
                                 "📨 Отправили отклик на вакансию",
                                 vacancy["alternate_url"],
                             )
+                            should_remember_dedupe = True
+                        else:
+                            should_remember_dedupe = True
                     except Redirect:
                         logger.warning(
                             f"Игнорирую перенаправление на форму: {vacancy['alternate_url']}"  # noqa: E501
                         )
                         continue
+
+                if should_remember_dedupe:
+                    self._remember_vacancy_dedupe(
+                        resume_id=resume["id"],
+                        vacancy=vacancy,
+                        dedupe_key=dedupe_key,
+                        known_dedupe_vacancy_ids=known_dedupe_vacancy_ids,
+                        persist=not self.dry_run,
+                    )
 
                 # Отправка письма на email
                 if self.args.send_email:
@@ -744,6 +802,115 @@ class Operation(BaseOperation):
         msg["To"] = to
         msg.set_content(body)
         self.tool.smtp.send_message(msg)
+
+    def _load_known_dedupe_vacancy_ids(
+        self, *, resume_id: str
+    ) -> dict[str, int]:
+        if not self.dedupe_vacancies:
+            return {}
+
+        return self.tool.storage.vacancy_response_dedup.list_vacancy_ids_by_key(
+            resume_id
+        )
+
+    def _seed_dedupe_from_existing_responses(
+        self,
+        *,
+        resume_id: str,
+        vacancies: list[SearchVacancy],
+        known_dedupe_vacancy_ids: dict[str, int],
+    ) -> None:
+        for vacancy in vacancies:
+            if not vacancy.get("relations"):
+                continue
+
+            dedupe_key = self._build_vacancy_dedupe_key(vacancy)
+            self._remember_vacancy_dedupe(
+                resume_id=resume_id,
+                vacancy=vacancy,
+                dedupe_key=dedupe_key,
+                known_dedupe_vacancy_ids=known_dedupe_vacancy_ids,
+                persist=not self.dry_run,
+            )
+
+    def _remember_vacancy_dedupe(
+        self,
+        *,
+        resume_id: str,
+        vacancy: SearchVacancy,
+        dedupe_key: str,
+        known_dedupe_vacancy_ids: dict[str, int],
+        persist: bool,
+    ) -> None:
+        if not self.dedupe_vacancies or not dedupe_key:
+            return
+
+        vacancy_id = int(vacancy["id"])
+        known_dedupe_vacancy_ids.setdefault(dedupe_key, vacancy_id)
+
+        if not persist:
+            return
+
+        employer_id = vacancy.get("employer", {}).get("id")
+        self.tool.storage.vacancy_response_dedup.remember(
+            resume_id=resume_id,
+            dedupe_key=dedupe_key,
+            vacancy_id=vacancy_id,
+            vacancy_name=vacancy.get("name", ""),
+            employer_id=int(employer_id) if employer_id else None,
+            alternate_url=vacancy.get("alternate_url"),
+        )
+
+    def _build_vacancy_dedupe_key(self, vacancy: SearchVacancy) -> str:
+        if not self.dedupe_vacancies:
+            return ""
+
+        employer_id = str(vacancy.get("employer", {}).get("id") or "")
+        title = self._normalize_vacancy_text(vacancy.get("name") or "")
+        description = self._normalize_vacancy_text(
+            self._get_vacancy_description(vacancy)
+        )
+        payload = "\n".join((employer_id, title, description))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _get_vacancy_description(self, vacancy: SearchVacancy) -> str:
+        vacancy_id = str(vacancy["id"])
+
+        if vacancy_id in self._vacancy_description_cache:
+            return self._vacancy_description_cache[vacancy_id]
+
+        description = ""
+        try:
+            vacancy_details = self.api_client.get(f"/vacancies/{vacancy_id}")
+            description = vacancy_details.get("description") or ""
+        except ApiError as ex:
+            logger.warning(
+                "Не удалось загрузить описание вакансии %s: %s",
+                vacancy.get("alternate_url"),
+                ex,
+            )
+
+        if not description:
+            snippet = vacancy.get("snippet") or {}
+            description = "\n".join(
+                filter(
+                    None,
+                    [
+                        snippet.get("requirement"),
+                        snippet.get("responsibility"),
+                    ],
+                )
+            )
+
+        self._vacancy_description_cache[vacancy_id] = description
+        return description
+
+    def _normalize_vacancy_text(self, value: str) -> str:
+        value = html.unescape(value)
+        value = value.replace("\xa0", " ").replace("\u200b", "")
+        value = strip_tags(value)
+        value = re.sub(r"\s+", " ", value)
+        return value.strip().casefold()
 
     json_decoder = JSONDecoder()
 
