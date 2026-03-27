@@ -29,6 +29,7 @@ class FakeApiClient:
     def __init__(self, descriptions):
         self.descriptions = descriptions
         self.post_calls = []
+        self.put_calls = []
 
     def get(self, path, *args, **kwargs):
         if path.startswith("/vacancies/"):
@@ -39,6 +40,10 @@ class FakeApiClient:
     def post(self, path, params, delay=None):
         assert path == "/negotiations"
         self.post_calls.append({"params": params, "delay": delay})
+        return {}
+
+    def put(self, path, *args, **kwargs):
+        self.put_calls.append(path)
         return {}
 
 
@@ -199,3 +204,33 @@ def test_dry_run_does_not_persist_dedupe_records():
 
     assert api_client.post_calls == []
     assert tool.storage.vacancy_response_dedup.count_total() == 0
+
+
+def test_env_excluded_keywords_skip_matching_vacancy_name():
+    vacancy = make_vacancy("101", name="Senior Backend Engineer")
+    operation, tool, api_client = make_operation(
+        [vacancy],
+        {"101": "<p>Build APIs for our platform</p>"},
+    )
+    operation.excluded_keywords_filter = r"(?:Senior)"
+    operation.dedupe_vacancies = False
+
+    operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert api_client.post_calls == []
+    assert api_client.put_calls == ["/vacancies/blacklisted/101"]
+
+
+def test_env_excluded_keywords_do_not_skip_non_matching_vacancy_name():
+    vacancy = make_vacancy("101", name="Backend Engineer")
+    operation, tool, api_client = make_operation(
+        [vacancy],
+        {"101": "<p>Build APIs for our platform</p>"},
+    )
+    operation.excluded_keywords_filter = r"(?:Senior)"
+    operation.dedupe_vacancies = False
+
+    operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert len(api_client.post_calls) == 1
+    assert api_client.post_calls[0]["params"]["vacancy_id"] == "101"

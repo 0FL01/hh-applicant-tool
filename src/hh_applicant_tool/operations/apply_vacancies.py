@@ -570,6 +570,7 @@ class Operation(BaseOperation):
 
                 if (
                     self.excluded_filter
+                    or self.excluded_keywords_filter
                     or (self.max_responses and self.max_responses > 0)
                 ) and self._is_filtered(vacancy):
                     logger.info(
