@@ -1,3 +1,10 @@
+# Networking notes:
+# - llm_agent отправляет webhook в tg_contact_collector через Docker DNS:
+#   CHAT_AGENT_WEBHOOK_URL=http://tg_contact_collector:8787/webhooks/hh/recruiter-contact-offer
+# - tg_contact_collector слушает на 0.0.0.0 внутри контейнера, но ports
+#   привязан к 127.0.0.1 — порт 8787 доступен только с хоста (для generic webhook).
+# - Оба сервиса в одной Docker Compose сети и видят друг друга по имени сервиса.
+
 services:
   llm_agent:
     container_name: hh_llm_agent
@@ -44,4 +51,4 @@ services:
       - TELEGRAM_COLLECTOR_LISTEN_HOST=${TELEGRAM_COLLECTOR_LISTEN_HOST:-0.0.0.0}
       - TELEGRAM_COLLECTOR_LISTEN_PORT=${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}
     ports:
-      - "${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}:${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}"
+      - "127.0.0.1:${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}:${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}"

@@ -4,6 +4,7 @@ import json
 import logging
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from re import compile as re_compile
 from threading import Lock
 from typing import Any
 
@@ -15,9 +16,13 @@ logger = logging.getLogger(__package__)
 
 HEALTH_PATH = "/healthz"
 WEBHOOK_PATH = "/webhooks/hh/recruiter-contact-offer"
+GENERIC_PATH = "/webhooks/generic"
 EVENT_TYPE = "recruiter_contact_offer"
 IDEMPOTENCY_HEADER = "X-Idempotency-Key"
 EVENT_HEADER = "X-HH-Applicant-Event"
+TEMPLATE_HEADER = "X-Telegram-Template"
+MAX_BODY_SIZE = 65536
+_TEMPLATE_VAR_RE = re_compile(r"\{\{(\w[\w.]*\w|\w)\}\}")
 
 
 class CollectorHTTPError(RuntimeError):
@@ -47,6 +52,88 @@ class TelegramContactCollectorService:
 
     def handle_health(self) -> CollectorResult:
         return CollectorResult(status_code=200, payload={"status": "ok"})
+
+    def handle_generic_webhook(
+        self,
+        *,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        body: bytes,
+    ) -> CollectorResult:
+        if method != "POST":
+            raise CollectorHTTPError(405, "method not allowed")
+        if path != GENERIC_PATH:
+            raise CollectorHTTPError(404, "not found")
+
+        if len(body) > MAX_BODY_SIZE:
+            raise CollectorHTTPError(413, "payload too large")
+
+        secret = self.config.webhook_secret
+        if secret:
+            header_value = headers.get(
+                self.config.webhook_secret_header, ""
+            ).strip()
+            if header_value != secret:
+                raise CollectorHTTPError(401, "unauthorized")
+
+        idempotency_key = headers.get(IDEMPOTENCY_HEADER, "").strip()
+        if not idempotency_key:
+            raise CollectorHTTPError(400, f"{IDEMPOTENCY_HEADER} is required")
+
+        payload = self._load_payload(body)
+        if not isinstance(payload, dict):
+            raise CollectorHTTPError(400, "payload must be a JSON object")
+
+        record = {
+            "idempotency_key": idempotency_key,
+            "event_type": "generic",
+            "created_at": payload.get("created_at") or "",
+            "payload_json": payload,
+        }
+
+        with self._lock:
+            existing = self.store.get(idempotency_key)
+            if existing is not None and existing.delivery_status == "sent":
+                return CollectorResult(
+                    status_code=200,
+                    payload={
+                        "status": "duplicate",
+                        "idempotency_key": idempotency_key,
+                        "telegram_message_id": existing.telegram_message_id,
+                    },
+                )
+
+            self.store.save_event(record)
+            template = headers.get(TEMPLATE_HEADER, "").strip()
+            message_text = self._render_generic(payload, template)
+            self.store.mark_attempt(idempotency_key)
+            try:
+                telegram_response = self.bot_client.send_message(message_text)
+            except TelegramBotError as ex:
+                self.store.mark_failed(idempotency_key, str(ex))
+                raise CollectorHTTPError(502, str(ex)) from ex
+
+            telegram_message_id = self._extract_telegram_message_id(
+                telegram_response
+            )
+            self.store.mark_sent(
+                idempotency_key,
+                telegram_message_id=telegram_message_id,
+            )
+        logger.info(
+            "Telegram collector forwarded generic %s telegram_msg_id=%s",
+            idempotency_key,
+            telegram_message_id,
+        )
+        return CollectorResult(
+            status_code=202,
+            payload={
+                "status": "forwarded",
+                "idempotency_key": idempotency_key,
+                "telegram_message_id": telegram_message_id,
+            },
+        )
 
     def handle_webhook(
         self,
@@ -241,6 +328,37 @@ class TelegramContactCollectorService:
         )
         return self._truncate("\n\n".join(parts), 4000)
 
+    def _render_generic(
+        self, payload: dict[str, Any], template: str | None
+    ) -> str:
+        if template:
+            return self._truncate(
+                self._render_template(template, payload), 4000
+            )
+        return self._truncate(
+            json.dumps(payload, ensure_ascii=False, indent=2), 4000
+        )
+
+    def _render_template(self, template: str, payload: dict[str, Any]) -> str:
+        """Simple {{key.path}} template rendering.
+
+        Supports dot-notation for nested keys: ``{{vacancy.name}}`` resolves
+        ``payload["vacancy"]["name"]``.  Missing keys produce empty string.
+        """
+
+        def _resolve(path: str) -> str:
+            current: Any = payload
+            for key in path.split("."):
+                if isinstance(current, dict):
+                    current = current.get(key)
+                else:
+                    return ""
+                if current is None:
+                    return ""
+            return str(current) if current is not None else ""
+
+        return _TEMPLATE_VAR_RE.sub(lambda m: _resolve(m.group(1)), template)
+
     def _extract_telegram_message_id(
         self,
         telegram_response: dict[str, object],
@@ -326,12 +444,20 @@ class TelegramCollectorRequestHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length)
         headers = {key: value for key, value in self.headers.items()}
         try:
-            result = self.server.service.handle_webhook(
-                method="POST",
-                path=self.path,
-                headers=headers,
-                body=body,
-            )
+            if self.path == GENERIC_PATH:
+                result = self.server.service.handle_generic_webhook(
+                    method="POST",
+                    path=self.path,
+                    headers=headers,
+                    body=body,
+                )
+            else:
+                result = self.server.service.handle_webhook(
+                    method="POST",
+                    path=self.path,
+                    headers=headers,
+                    body=body,
+                )
         except CollectorHTTPError as ex:
             self._write_json(ex.status_code, {"error": ex.message})
             return

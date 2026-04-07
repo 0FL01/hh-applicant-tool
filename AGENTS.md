@@ -82,7 +82,7 @@ LLM-модуль для автоответов в чатах работодат�
 - **ChatAgentService (`hh_llm_agent/service.py`)**: workflow автоответов: batch-run, quiet hours, debounce, outbox, audit в SQLite. INFO-логи на каждом этапе.
 - **OpenRouterChatClient (`hh_llm_agent/openrouter.py`)**: OpenRouter через SDK `openai` со structured outputs, reasoning, rate limiting и retry.
 - **TimingPolicy (`hh_llm_agent/timing.py`)**: политика сна, quiet hours по таймзоне, jitter.
-- **TelegramContactCollectorService (`hh_llm_agent/tg_contact_collector.py`)**: HTTP-приемник webhook `recruiter_contact_offer`, сохраняет лид в SQLite и пересылает через Telegram Bot API. Idempotency, retry при сбоях Telegram.
+- **TelegramContactCollectorService (`hh_llm_agent/tg_contact_collector.py`)**: HTTP-приемник webhook `recruiter_contact_offer`, сохраняет лид в SQLite и пересылает через Telegram Bot API. Idempotency, retry при сбоях Telegram. Также принимает generic-вебхуки на `POST /webhooks/generic` — любой JSON пересылается в Telegram с поддержкой шаблонов через заголовок `X-Telegram-Template` (синтаксис `{{key}}`, `{{nested.key}}`). Без шаблона отправляется JSON целиком.
 - **Storage Models**: 14 dataclass-моделей — `Employer`, `Vacancy`, `VacancyContact`, `VacancyResponseDedup`, `Negotiation`, `ChatMessage`, `Resume`, `AgentRun`, `AgentDecision`, `AgentOutbox`, `AgentWebhook`, `EmployerSite`, `Setting`, `Base`.
 
 ## Architecture & Rules

@@ -8,7 +8,9 @@ from hh_llm_agent.tg_contact_collector import (
     CollectorHTTPError,
     EVENT_HEADER,
     EVENT_TYPE,
+    GENERIC_PATH,
     IDEMPOTENCY_HEADER,
+    TEMPLATE_HEADER,
     WEBHOOK_PATH,
     TelegramContactCollectorService,
 )
@@ -223,3 +225,207 @@ def test_collector_rejects_invalid_secret(tmp_path):
         )
 
     assert exc.value.status_code == 401
+
+
+# ==================== Generic webhook tests ====================
+
+
+def test_generic_forwards_json_without_template(tmp_path):
+    config = make_config(tmp_path)
+    bot_client = FakeBotClient()
+    service = TelegramContactCollectorService(
+        config,
+        bot_client=bot_client,
+    )
+    payload = {"title": "Deploy", "status": "ok", "version": "1.2.3"}
+
+    result = service.handle_generic_webhook(
+        method="POST",
+        path=GENERIC_PATH,
+        headers={
+            IDEMPOTENCY_HEADER: "generic-1",
+            "X-Webhook-Secret": "supersecret",
+        },
+        body=json.dumps(payload).encode("utf-8"),
+    )
+
+    assert result.status_code == 202
+    assert result.payload["status"] == "forwarded"
+    assert len(bot_client.calls) == 1
+    sent_text = bot_client.calls[0]
+    assert "Deploy" in sent_text
+    assert "1.2.3" in sent_text
+
+
+def test_generic_renders_template_header(tmp_path):
+    config = make_config(tmp_path)
+    bot_client = FakeBotClient()
+    service = TelegramContactCollectorService(
+        config,
+        bot_client=bot_client,
+    )
+    payload = {
+        "title": "Deploy Complete",
+        "message": "Service api-v2 deployed to prod",
+        "extra": {"env": "production"},
+    }
+
+    result = service.handle_generic_webhook(
+        method="POST",
+        path=GENERIC_PATH,
+        headers={
+            IDEMPOTENCY_HEADER: "generic-2",
+            "X-Webhook-Secret": "supersecret",
+            TEMPLATE_HEADER: "{{title}}\n\n{{message}}\nEnv: {{extra.env}}",
+        },
+        body=json.dumps(payload).encode("utf-8"),
+    )
+
+    assert result.status_code == 202
+    sent_text = bot_client.calls[0]
+    assert sent_text.startswith("Deploy Complete")
+    assert "Service api-v2 deployed to prod" in sent_text
+    assert "Env: production" in sent_text
+
+
+def test_generic_deduplicates(tmp_path):
+    config = make_config(tmp_path)
+    bot_client = FakeBotClient()
+    service = TelegramContactCollectorService(
+        config,
+        bot_client=bot_client,
+    )
+    payload = {"alert": "test"}
+
+    headers = {
+        IDEMPOTENCY_HEADER: "generic-dup",
+        "X-Webhook-Secret": "supersecret",
+    }
+    body = json.dumps(payload).encode("utf-8")
+
+    first = service.handle_generic_webhook(
+        method="POST",
+        path=GENERIC_PATH,
+        headers=headers,
+        body=body,
+    )
+    second = service.handle_generic_webhook(
+        method="POST",
+        path=GENERIC_PATH,
+        headers=headers,
+        body=body,
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 200
+    assert second.payload["status"] == "duplicate"
+    assert len(bot_client.calls) == 1
+
+
+def test_generic_rejects_without_secret(tmp_path):
+    config = make_config(tmp_path)
+    service = TelegramContactCollectorService(
+        config,
+        bot_client=FakeBotClient(),
+    )
+
+    with pytest.raises(CollectorHTTPError) as exc:
+        service.handle_generic_webhook(
+            method="POST",
+            path=GENERIC_PATH,
+            headers={IDEMPOTENCY_HEADER: "k"},
+            body=b"{}",
+        )
+    assert exc.value.status_code == 401
+
+
+def test_generic_rejects_without_idempotency_key(tmp_path):
+    config = make_config(tmp_path)
+    service = TelegramContactCollectorService(
+        config,
+        bot_client=FakeBotClient(),
+    )
+
+    with pytest.raises(CollectorHTTPError) as exc:
+        service.handle_generic_webhook(
+            method="POST",
+            path=GENERIC_PATH,
+            headers={"X-Webhook-Secret": "supersecret"},
+            body=b'{"a":1}',
+        )
+    assert exc.value.status_code == 400
+
+
+def test_generic_rejects_get(tmp_path):
+    config = make_config(tmp_path)
+    service = TelegramContactCollectorService(
+        config,
+        bot_client=FakeBotClient(),
+    )
+
+    with pytest.raises(CollectorHTTPError) as exc:
+        service.handle_generic_webhook(
+            method="GET",
+            path=GENERIC_PATH,
+            headers={},
+            body=b"",
+        )
+    assert exc.value.status_code == 405
+
+
+def test_generic_retries_on_telegram_failure(tmp_path):
+    config = make_config(tmp_path)
+    bot_client = FakeBotClient()
+    bot_client.failures_remaining = 1
+    service = TelegramContactCollectorService(
+        config,
+        bot_client=bot_client,
+    )
+    payload = {"title": "retry-test"}
+    headers = {
+        IDEMPOTENCY_HEADER: "generic-retry",
+        "X-Webhook-Secret": "supersecret",
+    }
+    body = json.dumps(payload).encode("utf-8")
+
+    with pytest.raises(CollectorHTTPError) as exc:
+        service.handle_generic_webhook(
+            method="POST",
+            path=GENERIC_PATH,
+            headers=headers,
+            body=body,
+        )
+    assert exc.value.status_code == 502
+
+    result = service.handle_generic_webhook(
+        method="POST",
+        path=GENERIC_PATH,
+        headers=headers,
+        body=body,
+    )
+    assert result.status_code == 202
+    assert len(bot_client.calls) == 2
+
+
+def test_generic_template_missing_keys_produce_empty(tmp_path):
+    config = make_config(tmp_path)
+    bot_client = FakeBotClient()
+    service = TelegramContactCollectorService(
+        config,
+        bot_client=bot_client,
+    )
+    payload = {"title": "Hello"}
+
+    result = service.handle_generic_webhook(
+        method="POST",
+        path=GENERIC_PATH,
+        headers={
+            IDEMPOTENCY_HEADER: "generic-missing",
+            "X-Webhook-Secret": "supersecret",
+            TEMPLATE_HEADER: "{{title}} / {{missing_key}}",
+        },
+        body=json.dumps(payload).encode("utf-8"),
+    )
+
+    assert result.status_code == 202
+    assert bot_client.calls[0] == "Hello / "
