@@ -1253,7 +1253,15 @@ class Operation(BaseOperation):
             keywords_pat: re.Pattern = re.compile(
                 self.excluded_keywords_filter, re.IGNORECASE
             )
-            if keywords_pat.search(vacancy["name"]):
+            # Проверяем и название вакансии, и название компании-работодателя.
+            # Это позволяет отсекать вакансии от компаний вроде "Сбер", где
+            # ключевое слово находится в имени работодателя, а не в тексте
+            # самой вакансии.
+            search_text = vacancy["name"]
+            employer_name = vacancy.get("employer", {}).get("name", "")
+            if employer_name:
+                search_text += " " + employer_name
+            if keywords_pat.search(search_text):
                 return True
 
         if not self.excluded_filter and not self.max_responses:

@@ -234,3 +234,39 @@ def test_env_excluded_keywords_do_not_skip_non_matching_vacancy_name():
 
     assert len(api_client.post_calls) == 1
     assert api_client.post_calls[0]["params"]["vacancy_id"] == "101"
+
+
+def test_env_excluded_keywords_skip_matching_employer_name():
+    """Ключевое слово совпадает с названием компании, но не с названием вакансии
+    — вакансия должна быть отфильтрована и добавлена в черный список."""
+    vacancy = make_vacancy("202", name="Backend Engineer", employer_id="900")
+    # Подменяем название работодателя на "Сбер", чтобы проверить фильтр по компании
+    vacancy["employer"]["name"] = "Сбер"
+    operation, tool, api_client = make_operation(
+        [vacancy],
+        {"202": "<p>Build APIs for our platform</p>"},
+    )
+    operation.excluded_keywords_filter = r"(?:Сбер)"
+    operation.dedupe_vacancies = False
+
+    operation._apply_resume(RESUME, USER, seen_employers={"900"})
+
+    assert api_client.post_calls == []
+    assert api_client.put_calls == ["/vacancies/blacklisted/202"]
+
+
+def test_env_excluded_keywords_do_not_skip_when_employer_does_not_match():
+    """Ключевое слово не совпадает ни с вакансией, ни с компанией — отклик проходит."""
+    vacancy = make_vacancy("303", name="Backend Engineer", employer_id="800")
+    vacancy["employer"]["name"] = "Yandex"
+    operation, tool, api_client = make_operation(
+        [vacancy],
+        {"303": "<p>Build APIs for our platform</p>"},
+    )
+    operation.excluded_keywords_filter = r"(?:Сбер)"
+    operation.dedupe_vacancies = False
+
+    operation._apply_resume(RESUME, USER, seen_employers={"800"})
+
+    assert len(api_client.post_calls) == 1
+    assert api_client.post_calls[0]["params"]["vacancy_id"] == "303"
