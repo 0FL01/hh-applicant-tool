@@ -429,3 +429,77 @@ def test_generic_template_missing_keys_produce_empty(tmp_path):
 
     assert result.status_code == 202
     assert bot_client.calls[0] == "Hello / "
+
+
+def test_hh_webhook_accepts_string_negotiation_id(tmp_path):
+    """HH API returns negotiation.id as string, e.g. '5145860360'."""
+    config = make_config(tmp_path)
+    bot_client = FakeBotClient()
+    service = TelegramContactCollectorService(
+        config,
+        bot_client=bot_client,
+    )
+    payload = {
+        "event_type": EVENT_TYPE,
+        "idempotency_key": "recruiter_contact_offer:5145860360:msg-1",
+        "created_at": "2026-04-07T12:00:00+00:00",
+        "classifier": {
+            "category": EVENT_TYPE,
+            "action": "skip",
+            "reason": "direct_contacts_shared",
+            "confidence": 0.97,
+        },
+        "candidate": {
+            "first_name": "Ivan",
+            "last_name": "Petrov",
+            "resume_id": "resume-1",
+            "resume_title": "Backend Engineer",
+        },
+        "negotiation": {
+            "id": "5145860360",
+            "chat_id": 11,
+            "state": "active",
+            "last_message_id": "msg-1",
+            "updated_at": "2026-04-07T12:00:00+00:00",
+        },
+        "vacancy": {
+            "id": "101",
+            "name": "Platform Engineer",
+            "alternate_url": "https://hh.ru/vacancy/101",
+            "area": {"id": "1", "name": "Moscow"},
+            "salary": {
+                "from": 200000,
+                "to": 300000,
+                "currency": "RUR",
+                "gross": False,
+            },
+        },
+        "employer": {
+            "id": "201",
+            "name": "TechCorp",
+            "site_url": "https://techcorp.example.com",
+            "alternate_url": "https://hh.ru/employer/201",
+        },
+        "contacts": {
+            "from_message": {
+                "telegram_handles": ["@recruiter"],
+                "emails": [],
+                "phones": [],
+            },
+        },
+    }
+
+    result = service.handle_webhook(
+        method="POST",
+        path=WEBHOOK_PATH,
+        headers={
+            IDEMPOTENCY_HEADER: "recruiter_contact_offer:5145860360:msg-1",
+            EVENT_HEADER: EVENT_TYPE,
+            "X-Webhook-Secret": "supersecret",
+        },
+        body=json.dumps(payload).encode("utf-8"),
+    )
+
+    assert result.status_code == 202
+    assert result.payload["status"] == "forwarded"
+    assert len(bot_client.calls) == 1

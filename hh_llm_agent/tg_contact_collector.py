@@ -249,8 +249,15 @@ class TelegramContactCollectorService:
         vacancy = payload.get("vacancy") or {}
         employer = payload.get("employer") or {}
 
-        negotiation_id = negotiation.get("id")
-        if not isinstance(negotiation_id, int) or negotiation_id <= 0:
+        raw_negotiation_id = negotiation.get("id")
+        try:
+            negotiation_id = int(raw_negotiation_id)
+        except (TypeError, ValueError):
+            raise CollectorHTTPError(
+                400,
+                f"negotiation.id must be a positive integer, got {raw_negotiation_id!r}",
+            ) from None
+        if negotiation_id <= 0:
             raise CollectorHTTPError(
                 400, "negotiation.id must be a positive integer"
             )
