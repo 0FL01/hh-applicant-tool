@@ -538,6 +538,57 @@ def test_recruiter_contact_offer_sends_webhook(monkeypatch):
     assert webhook_items[0].status == "sent"
 
 
+def test_recruiter_contact_offer_without_real_contacts_is_downgraded(
+    monkeypatch,
+):
+    """Classifier says recruiter_contact_offer but message has no contacts —
+    guard should downgrade to irrelevant and skip without sending webhook."""
+    FakeLLMClient.reset()
+    FakeWebhookClient.reset()
+    recruiter_message = {
+        **EMPLOYER_MESSAGE,
+        "text": (
+            "Андрей, здравствуйте!\n"
+            "Рассмотрим ваше резюме. Если навыки и опыт подойдут для позиции, "
+            "мы свяжемся с вами.\n"
+            "Конкина Александра"
+        ),
+    }
+    FakeLLMClient.replies[CLASSIFIER_MODEL] = LLMReply(
+        content='{"action":"skip","category":"recruiter_contact_offer","reason":"invites_contact","confidence":0.8}',
+        parsed={
+            "action": "skip",
+            "category": "recruiter_contact_offer",
+            "reason": "invites_contact",
+            "confidence": 0.8,
+        },
+    )
+    tool = make_tool()
+    gateway = FakeGateway(responses=[[recruiter_message]])
+
+    service = make_service(
+        monkeypatch,
+        tool,
+        gateway,
+        dry_run=False,
+        webhook_enabled=True,
+    )
+    stats = service.run()
+
+    assert stats.skipped == 1
+    # No webhook should have been sent
+    assert len(FakeWebhookClient.instances) == 1
+    assert len(FakeWebhookClient.instances[0].calls) == 0
+    # Decision should be saved with irrelevant category
+    decisions = list(tool.storage.agent_decisions.find())
+    assert len(decisions) == 1
+    assert decisions[0].classifier_category == "irrelevant"
+    assert decisions[0].reason == "no_contacts_found_in_message"
+    # No webhook items in storage
+    webhook_items = list(tool.storage.agent_webhooks.find())
+    assert len(webhook_items) == 0
+
+
 def test_qa_series_is_queued_and_sent_in_order(monkeypatch):
     FakeLLMClient.reset()
     FakeLLMClient.replies[REPLY_MODEL] = LLMReply(

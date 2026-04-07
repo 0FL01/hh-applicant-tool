@@ -980,6 +980,52 @@ class ChatAgentService:
             classification=classification,
             last_message=last_message,
         )
+
+        # Guard: verify that contacts were actually extracted from message
+        # text. Classifier LLM may incorrectly label a message as
+        # recruiter_contact_offer when no real contact info is present.
+        from_contacts = (payload.get("contacts") or {}).get(
+            "from_message"
+        ) or {}
+        has_real_contacts = bool(
+            from_contacts.get("emails")
+            or from_contacts.get("telegram_urls")
+            or from_contacts.get("telegram_handles")
+            or from_contacts.get("phones")
+        )
+        if not has_real_contacts:
+            logger.info(
+                "Negotiation %s: classifier said recruiter_contact_offer "
+                "but no contacts found in message text — downgrading to "
+                "irrelevant",
+                negotiation["id"],
+            )
+            self._save_decision(
+                negotiation=negotiation,
+                last_message=last_message,
+                action="skip",
+                reason="no_contacts_found_in_message",
+                reply_text="",
+                raw_response="",
+                reasoning_details=[],
+                classifier_category="irrelevant",
+                classifier_reason="classifier_false_positive_recruiter_contact_offer",
+                classifier_confidence=float(classification["confidence"]),
+                classifier_raw_response=classifier_reply.content,
+            )
+            self.stats.skipped += 1
+            self._log_negotiation_outcome(
+                negotiation,
+                "skipped",
+                reason="no_contacts_found_in_message",
+                classifier_category="irrelevant",
+            )
+            print(
+                f"⏭️ Пропущен чат {negotiation['id']}: "
+                "no_contacts_found_in_message"
+            )
+            return
+
         self._save_decision(
             negotiation=negotiation,
             last_message=last_message,
