@@ -77,8 +77,8 @@ REPLY_RESPONSE_SCHEMA = StructuredOutputSchema(
             },
             "reply_mode": {
                 "type": "string",
-                "enum": ["single", "qa_series"],
-                "description": "Single message or short Q/A series.",
+                "enum": ["single", "qa_series", "short"],
+                "description": "Single message, short Q/A series, or very short screening answer (1-5 words).",
             },
             "reply_text": {
                 "type": "string",
@@ -654,11 +654,12 @@ class ChatAgentService:
                     f"Неотвеченный пакет сообщений работодателя:\n{unanswered_block}\n\n"
                     f"{self.config.reply_instruction}\n"
                     "Правила:\n"
-                    "- Если это screening или anti-bot вопросы, отвечай предметно, без пустых фраз.\n"
+                    "- Если это screening вопрос (особенно с маркерами 'несколько вопросов', 'пару минут'), используй reply_mode='short' и отвечай 1-5 словами (ключевое слово или короткая фраза).\n"
+                    "- Для screening: 'creates', 'Kubernetes', '150000 руб' — без объяснений.\n"
                     "- Если работодатель просит уточнить прошлый ответ, добавляй конкретику, а не повторяй прежнюю формулировку.\n"
                     "- Если вопрос требует данных от работодателя, корректно уточни их и не выдумывай факты о кандидате.\n"
-                    "- Если во входящем пакете несколько отдельных вопросов, ответь на каждый по порядку.\n"
-                    "- Для qa_series верни 2-3 коротких сообщения без markdown и эмодзи."
+                    "- Для qa_series верни 2-3 коротких сообщения без markdown и эмодзи.\n"
+                    "- Для short mode: ТОЛЬКО ответ, без вступлений и пояснений."
                 ),
             }
         )
@@ -1128,8 +1129,18 @@ class ChatAgentService:
         ]
         reason = str(payload.get("reason") or "").strip()
 
-        if reply_mode not in {"single", "qa_series"}:
+        if reply_mode not in {"single", "qa_series", "short"}:
             reply_mode = "qa_series" if reply_messages else "single"
+
+        # Handle short mode: treat as single message but keep mode for tracking
+        if reply_mode == "short":
+            if reply_text:
+                reply_messages = [reply_text]
+            elif reply_messages:
+                reply_text = reply_messages[0]
+            else:
+                action = "skip"
+                reason = reason or "empty_short_reply"
 
         if (
             action == "reply"
