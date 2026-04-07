@@ -1,8 +1,8 @@
 """Собрать сырые данные API из переговоров с роботом-рекрутером для анализа.
 
-Обходит все активные переговоры, загружает полные ответы API
+Обходит переговоры, загружает полные ответы API
 (без фильтрации with_text_only) и сохраняет JSON-дамп тех,
-голько где встречается «Робот-рекрутер».
+где встречается «Робот-рекрутер».
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ class Namespace(BaseNamespace):
     all_negotiations: bool
     limit: int
     verbose: bool
+    status: str
 
 
 class Operation(BaseOperation):
@@ -59,6 +60,12 @@ class Operation(BaseOperation):
             action="store_true",
             default=False,
         )
+        parser.add_argument(
+            "-s",
+            "--status",
+            help="Статус переговоров (active, discard, archived и т.д.)",
+            default="active",
+        )
 
     def run(self, tool: HHApplicantTool) -> None | int:
         args: Namespace = tool.args
@@ -70,8 +77,8 @@ class Operation(BaseOperation):
             else tool.config_path / "debug_dump.json"
         )
 
-        print(f"[*] Загрузка переговоров...")
-        negotiations = list(tool.get_negotiations())
+        print(f"[*] Загрузка переговоров (status={args.status})...")
+        negotiations = list(tool.get_negotiations(status=args.status))
         total = len(negotiations)
         print(f"[*] Всего переговоров: {total}")
 
