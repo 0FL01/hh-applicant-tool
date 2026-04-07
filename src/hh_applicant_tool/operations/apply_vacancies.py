@@ -82,6 +82,12 @@ class Namespace(BaseNamespace):
     max_responses: int
     send_email: bool
     dedupe_vacancies: bool
+    # HOTFIX(2026-04-07): Временное решение для обхода бага с парсингом тестов.
+    # HH.ru изменил структуру HTML, и _get_vacancy_tests падает с "tests not found".
+    # При включении этого флага вакансии с тестами пропускаются полностью.
+    # TODO: Перейти на API endpoint или обновить маркеры парсинга.
+    # См.: https://github.com/s3rgeym/hh-applicant-tool/commit/2d117c69930d065af3fb378ad7320060551c42ff
+    skip_tests: bool
 
 
 class Operation(BaseOperation):
@@ -164,6 +170,18 @@ class Operation(BaseOperation):
             "--dedupe-vacancies",
             help="Пропускать вакансии-дубли с одинаковыми названием и описанием",
             default=True,
+            action=argparse.BooleanOptionalAction,
+        )
+        # HOTFIX(2026-04-07): Флаг для пропуска вакансий с тестами.
+        # Проблема: _get_vacancy_tests ищет маркеры 'vacancyTests' и 'counters' в HTML,
+        # но HH.ru изменил структуру страницы (возможно, поле переименовалось или
+        # данные теперь загружаются динамически через AJAX).
+        # Временное решение: пропускать такие вакансии, чтобы не падать с ошибкой.
+        # Полное решение требует реверс-инжиниринга новой структуры HH.ru.
+        # Upstream issue: флаг добавлен в коммите 2d117c6 как workaround.
+        parser.add_argument(
+            "--skip-tests",
+            help="Пропускать вакансии с тестами вместо попытки их решить (workaround для изменений в API HH.ru)",
             action=argparse.BooleanOptionalAction,
         )
 
@@ -368,6 +386,9 @@ class Operation(BaseOperation):
         self.date_from = args.date_from
         self.date_to = args.date_to
         self.dedupe_vacancies = args.dedupe_vacancies
+        # HOTFIX(2026-04-07): Синхронизируем флаг пропуска тестов.
+        # Причина: см. комментарий в Namespace.skip_tests и в setup_parser.
+        self.skip_tests = args.skip_tests
         self.dry_run = args.dry_run
         self.employer_id = args.employer_id
         self.employment = args.employment
@@ -678,6 +699,27 @@ class Operation(BaseOperation):
                 )
 
                 should_remember_dedupe = False
+
+                # HOTFIX(2026-04-07): Пропускаем вакансии с тестами если включен флаг.
+                # Проблема: _solve_vacancy_test -> _get_vacancy_tests парсит HTML от HH.ru,
+                # ищу JSON-маркеры 'vacancyTests' и 'counters', но HH.ru изменил структуру.
+                # Возможные причины:
+                #   - Переименование полей (vacancyTests -> testData, tests, и т.д.)
+                #   - Переход на динамическую загрузку через AJAX
+                #   - Изменение endpoint'а страницы отклика
+                # Полное решение: реверс-инжиниринг новой структуры + переход на API (если есть)
+                # Временное решение: пропускать такие вакансии, чтобы не падать с ошибкой.
+                # Upstream: https://github.com/s3rgeym/hh-applicant-tool/commit/2d117c69930d065af3fb378ad7320060551c42ff
+                if vacancy.get("has_test") and self.skip_tests:
+                    logger.debug(
+                        "Пропускаю вакансию с тестом (флаг --skip-tests): %s",
+                        vacancy["alternate_url"],
+                    )
+                    print(
+                        "⏩ Пропущена вакансия с тестом:",
+                        vacancy["alternate_url"],
+                    )
+                    continue
 
                 if vacancy.get("has_test"):
                     logger.debug(
