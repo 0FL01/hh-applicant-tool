@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 _ROBOT_MARKER = "робот-рекрутер"
 _ROBOT_MARKER_ALT = "робот—рекрутер"
+_ROBOT_MARKER_ENG = "robot-recruiter"
+_EMPLOYER_MARKER = "консалт"
 
 
 class Namespace(BaseNamespace):
@@ -28,6 +30,7 @@ class Namespace(BaseNamespace):
     limit: int
     verbose: bool
     status: str
+    search: str | None
 
 
 class Operation(BaseOperation):
@@ -66,6 +69,11 @@ class Operation(BaseOperation):
             help="Статус переговоров (active, discard, archived и т.д.)",
             default="active",
         )
+        parser.add_argument(
+            "--search",
+            help="Поиск по имени работодателя (case-insensitive, substring)",
+            default=None,
+        )
 
     def run(self, tool: HHApplicantTool) -> None | int:
         args: Namespace = tool.args
@@ -85,17 +93,24 @@ class Operation(BaseOperation):
         dumped: list[dict] = []
         robot_count = 0
         processed = 0
+        all_keys: set[str] = set()  # Собираем все ключи сообщений для анализа
 
         for neg in negotiations:
             if args.limit and processed >= args.limit:
                 print(f"[*] Достигнут лимит --limit={args.limit}")
                 break
-            processed += 1
-            nid = neg.get("id", "?")
-            neg_title = ""
+
             vacancy = neg.get("vacancy") or {}
             employer = (vacancy.get("employer") or {}).get("name", "")
-            neg_title = f"{vacancy.get('name', '')} ({employer})"
+            vacancy_name = vacancy.get("name", "")
+
+            # Фильтр по работодателю
+            if args.search and args.search.lower() not in employer.lower():
+                continue
+
+            processed += 1
+            nid = neg.get("id", "?")
+            neg_title = f"{vacancy_name} ({employer})"
 
             # Загружаем полные сообщения (без with_text_only)
             print(f"  [{processed}/{total}] nid={nid} {neg_title[:60]}")
@@ -109,7 +124,12 @@ class Operation(BaseOperation):
                 continue
 
             all_items = messages_raw.get("items", [])
-            has_robot = any(_has_robot_marker(msg) for msg in all_items)
+            # Собираем все ключи для анализа структуры
+            for msg in all_items:
+                all_keys.update(msg.keys())
+            has_robot = any(
+                _has_robot_marker(msg, employer) for msg in all_items
+            )
 
             if not has_robot and not args.all_negotiations:
                 continue
@@ -138,6 +158,8 @@ class Operation(BaseOperation):
         print(
             f"\n[*] Обработано: {processed}, с роботом-рекрутером: {robot_count}"
         )
+        if all_keys:
+            print(f"[*] Ключи в сообщениях: {sorted(all_keys)}")
         print(f"[*] Запись дампа в {output_path}")
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,6 +193,20 @@ def _fetch_all_messages(api, nid: str) -> dict:
     }
 
 
-def _has_robot_marker(msg: dict) -> bool:
+def _has_robot_marker(msg: dict, employer_name: str = "") -> bool:
+    """Проверить, содержит ли сообщение маркеры робота-рекрутера."""
     text = (msg.get("text") or "").lower()
-    return _ROBOT_MARKER in text or _ROBOT_MARKER_ALT in text
+    author = (msg.get("author") or {}).get("participant_type", "").lower()
+
+    # Маркеры в тексте
+    text_markers = [
+        _ROBOT_MARKER,
+        _ROBOT_MARKER_ALT,
+        _ROBOT_MARKER_ENG,
+    ]
+    has_text_marker = any(m in text for m in text_markers)
+
+    # Маркер работодателя
+    has_employer_marker = _EMPLOYER_MARKER in employer_name.lower()
+
+    return has_text_marker or has_employer_marker
