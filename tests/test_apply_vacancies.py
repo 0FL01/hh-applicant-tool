@@ -142,6 +142,8 @@ def make_operation(vacancies, descriptions, *, dry_run=False):
     operation.max_responses = None
     operation.openai_chat = None
     operation.pre_prompt = ""
+    operation.skip_tests = False
+    operation.work_format = ["REMOTE"]
     operation._vacancy_description_cache = {}
     operation._get_vacancies = lambda resume_id=None: iter(vacancies)
     return operation, tool, api_client
@@ -270,3 +272,96 @@ def test_env_excluded_keywords_do_not_skip_when_employer_does_not_match():
 
     assert len(api_client.post_calls) == 1
     assert api_client.post_calls[0]["params"]["vacancy_id"] == "303"
+
+
+def test_work_format_filter_removes_on_site():
+    """Вакансия с ON_SITE фильтруется при work_format=["REMOTE"]."""
+    vacancy = make_vacancy("101")
+    vacancy["work_format"] = [
+        {"id": "ON_SITE", "name": "На месте работодателя"}
+    ]
+    operation, tool, api_client = make_operation(
+        [vacancy],
+        {"101": "<p>Build APIs for our platform</p>"},
+    )
+    operation.dedupe_vacancies = False
+
+    operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert api_client.post_calls == []
+
+
+def test_work_format_filter_passes_remote():
+    """Вакансия с REMOTE проходит при work_format=["REMOTE"]."""
+    vacancy = make_vacancy("101")
+    vacancy["work_format"] = [{"id": "REMOTE", "name": "Удалённо"}]
+    operation, tool, api_client = make_operation(
+        [vacancy],
+        {"101": "<p>Build APIs for our platform</p>"},
+    )
+    operation.dedupe_vacancies = False
+
+    operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert len(api_client.post_calls) == 1
+    assert api_client.post_calls[0]["params"]["vacancy_id"] == "101"
+
+
+def test_work_format_filter_disabled_when_empty():
+    """Пустой work_format=[] пропускает все вакансии."""
+    vacancy = make_vacancy("101")
+    vacancy["work_format"] = [
+        {"id": "ON_SITE", "name": "На месте работодателя"}
+    ]
+    operation, tool, api_client = make_operation(
+        [vacancy],
+        {"101": "<p>Build APIs for our platform</p>"},
+    )
+    operation.dedupe_vacancies = False
+    operation.work_format = []
+
+    operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert len(api_client.post_calls) == 1
+    assert api_client.post_calls[0]["params"]["vacancy_id"] == "101"
+
+
+def test_work_format_filter_multiple():
+    """work_format=["REMOTE","HYBRID"] пропускает REMOTE и HYBRID, отсекает ON_SITE."""
+    remote = make_vacancy("101")
+    remote["work_format"] = [{"id": "REMOTE", "name": "Удалённо"}]
+    hybrid = make_vacancy("202")
+    hybrid["work_format"] = [{"id": "HYBRID", "name": "Гибрид"}]
+    onsite = make_vacancy("303")
+    onsite["work_format"] = [{"id": "ON_SITE", "name": "На месте работодателя"}]
+    operation, tool, api_client = make_operation(
+        [remote, hybrid, onsite],
+        {
+            "101": "<p>Remote</p>",
+            "202": "<p>Hybrid</p>",
+            "303": "<p>On-site</p>",
+        },
+    )
+    operation.dedupe_vacancies = False
+    operation.work_format = ["REMOTE", "HYBRID"]
+
+    operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    applied_ids = [c["params"]["vacancy_id"] for c in api_client.post_calls]
+    assert applied_ids == ["101", "202"]
+
+
+def test_work_format_filter_passes_when_vacancy_has_no_format():
+    """Вакансия без work_format не фильтруется (поле пустое или отсутствует)."""
+    vacancy = make_vacancy("101")
+    vacancy["work_format"] = []
+    operation, tool, api_client = make_operation(
+        [vacancy],
+        {"101": "<p>Build APIs for our platform</p>"},
+    )
+    operation.dedupe_vacancies = False
+
+    operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert len(api_client.post_calls) == 1
+    assert api_client.post_calls[0]["params"]["vacancy_id"] == "101"

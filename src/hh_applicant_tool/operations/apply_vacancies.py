@@ -88,6 +88,7 @@ class Namespace(BaseNamespace):
     # TODO: Перейти на API endpoint или обновить маркеры парсинга.
     # См.: https://github.com/s3rgeym/hh-applicant-tool/commit/2d117c69930d065af3fb378ad7320060551c42ff
     skip_tests: bool
+    work_format: list[str] | None
 
 
 class Operation(BaseOperation):
@@ -297,6 +298,13 @@ class Operation(BaseOperation):
             nargs="+",
             help="Поля поиска (name, company_name и т.п.)",
         )
+        api_search_filters.add_argument(
+            "--work-format",
+            nargs="*",
+            help="Формат работы (id из справочника: ON_SITE, REMOTE, HYBRID, FIELD_WORK, FLY_IN_FLY_OUT). "
+            "По умолчанию: REMOTE. "
+            "Пустое значение --work-format отключает фильтр.",
+        )
 
     cover_letter: str = "{Здравствуйте|Добрый день}, меня зовут %(first_name)s. {Прошу|Предлагаю} рассмотреть {мою кандидатуру|мое резюме «%(resume_title)s»} на вакансию «%(vacancy_name)s». С уважением, %(first_name)s."
 
@@ -372,6 +380,7 @@ class Operation(BaseOperation):
         )
         env_cover_letter = getenv("HH_APPLY_COVER_LETTER")
         env_excluded_keywords = getenv(self.excluded_keywords_env_name)
+        env_work_format = getenv("HH_APPLY_WORK_FORMAT")
 
         self.cover_letter = (
             args.letter_file.read_text(encoding="utf-8", errors="ignore")
@@ -398,6 +407,23 @@ class Operation(BaseOperation):
             env_keywords=env_excluded_keywords,
         )
         self.experience = args.experience
+        # work_format: CLI > env > default(["REMOTE"])
+        # --work-format без значений → [] → фильтр выключен
+        # --work-format REMOTE HYBRID → ["REMOTE", "HYBRID"]
+        # env HH_APPLY_WORK_FORMAT=REMOTE,HYBRID → ["REMOTE", "HYBRID"]
+        # env HH_APPLY_WORK_FORMAT= → [] → фильтр выключен
+        # ничего не указано → ["REMOTE"]
+        cli_work_format = args.work_format
+        if cli_work_format is not None:
+            self.work_format = [v for v in cli_work_format if v]
+        elif env_work_format is not None:
+            self.work_format = [
+                v.strip()
+                for v in env_work_format.replace(";", ",").split(",")
+                if v.strip()
+            ]
+        else:
+            self.work_format = ["REMOTE"]
         self.force_message = (
             args.force_message
             if args.force_message is not None
@@ -586,6 +612,15 @@ class Operation(BaseOperation):
                         "Пропускаем вакансию %s с перенаправлением: %s",
                         vacancy["alternate_url"],
                         redirect_url,
+                    )
+                    continue
+
+                if self._is_work_format_filtered(vacancy):
+                    logger.info(
+                        "Пропускаем вакансию с неподходящим форматом работы: %s (work_format=%s, allowed=%s)",
+                        vacancy["alternate_url"],
+                        vacancy.get("work_format"),
+                        self.work_format,
                     )
                     continue
 
@@ -1208,6 +1243,8 @@ class Operation(BaseOperation):
             params["no_magic"] = bool2str(self.no_magic)
         if self.premium:
             params["premium"] = bool2str(self.premium)
+        if self.work_format:
+            params["work_format"] = self.work_format
         # if self.responses_count_enabled is not None:
         #     params["responses_count_enabled"] = bool2str(self.responses_count_enabled)
 
@@ -1240,6 +1277,15 @@ class Operation(BaseOperation):
 
             if page >= res["pages"] - 1:
                 return
+
+    def _is_work_format_filtered(self, vacancy: SearchVacancy) -> bool:
+        if not self.work_format:
+            return False
+        formats = vacancy.get("work_format") or []
+        format_ids = {f.get("id") for f in formats if f.get("id")}
+        if not format_ids:
+            return False
+        return not format_ids.intersection(self.work_format)
 
     def _is_filtered(self, vacancy: SearchVacancy) -> bool:
         if (
