@@ -709,3 +709,167 @@ def test_run_logs_skip_summary(monkeypatch, caplog):
         in record.getMessage()
         for record in caplog.records
     )
+
+
+def _make_service_for_unit():
+    """Create a minimal ChatAgentService instance for unit-testing internal methods."""
+    tool = make_tool()
+    config = make_config(dry_run=True)
+    service = object.__new__(ChatAgentService)
+    service.tool = tool
+    service.config = config
+    service.timing = TimingPolicy(config.timing)
+    service.sleep_fn = lambda seconds: None
+    return service
+
+
+def _make_messages(qa_pairs: list[tuple[str, str]]):
+    """Build alternating employer/applicant messages from (question, answer) pairs."""
+    messages = []
+    for idx, (question, answer) in enumerate(qa_pairs):
+        messages.append(
+            {
+                "id": f"msg-e-{idx}",
+                "text": question,
+                "author": {"participant_type": "employer"},
+                "created_at": f"2026-03-11T1{idx}:00:00+03:00",
+            }
+        )
+        if answer:
+            messages.append(
+                {
+                    "id": f"msg-a-{idx}",
+                    "text": answer,
+                    "author": {"participant_type": "applicant"},
+                    "created_at": f"2026-03-11T1{idx}:01:00+03:00",
+                }
+            )
+    return messages
+
+
+def test_is_bot_loop_detects_repeated_question():
+    service = _make_service_for_unit()
+    messages = _make_messages(
+        [
+            (
+                "Какое количество людей было у вас в подчинении?",
+                "5-7 инженеров.",
+            ),
+            ("Используете ли GitOps?", "Да, ArgoCD."),
+            (
+                "Какое количество людей было у вас в подчинении?",
+                "5-7 инженеров.",
+            ),
+            (
+                "Какое количество людей было у вас в подчинении?",
+                "5-7 инженеров.",
+            ),
+        ]
+    )
+    employer_tail = [
+        {
+            "id": "msg-tail",
+            "text": "Какое количество людей было у вас в подчинении?",
+            "author": {"participant_type": "employer"},
+        }
+    ]
+    assert service._is_bot_loop(messages, employer_tail) is True
+
+
+def test_is_bot_loop_not_triggered_by_different_questions():
+    service = _make_service_for_unit()
+    messages = _make_messages(
+        [
+            ("Какой опыт с Kubernetes?", "3 года."),
+            ("Используете ли GitOps?", "Да, ArgoCD."),
+        ]
+    )
+    employer_tail = [
+        {
+            "id": "msg-tail",
+            "text": "Какая версия Kubernetes используется?",
+            "author": {"participant_type": "employer"},
+        }
+    ]
+    assert service._is_bot_loop(messages, employer_tail) is False
+
+
+def test_is_bot_loop_not_triggered_by_multi_question_tail():
+    service = _make_service_for_unit()
+    messages = _make_messages(
+        [
+            ("Расскажите о себе.", "Я DevOps инженер."),
+        ]
+    )
+    employer_tail = [
+        {
+            "id": "msg-tail-1",
+            "text": "Какой опыт с Kubernetes?",
+            "author": {"participant_type": "employer"},
+        },
+        {
+            "id": "msg-tail-2",
+            "text": "Зарплатные ожидания?",
+            "author": {"participant_type": "employer"},
+        },
+    ]
+    assert service._is_bot_loop(messages, employer_tail) is False
+
+
+def test_is_bot_loop_not_triggered_when_no_prior_answer():
+    service = _make_service_for_unit()
+    messages = [
+        {
+            "id": "msg-e-0",
+            "text": "Какое количество людей было у вас в подчинении?",
+            "author": {"participant_type": "employer"},
+        }
+    ]
+    employer_tail = [
+        {
+            "id": "msg-tail",
+            "text": "Какое количество людей было у вас в подчинении?",
+            "author": {"participant_type": "employer"},
+        }
+    ]
+    assert service._is_bot_loop(messages, employer_tail) is False
+
+
+def test_process_negotiation_skips_bot_loop_without_llm_calls(monkeypatch):
+    FakeLLMClient.reset()
+    tool = make_tool()
+    bot_messages = _make_messages(
+        [
+            (
+                "Какое количество людей было у вас в подчинении?",
+                "5-7 инженеров.",
+            ),
+            (
+                "Какое количество людей было у вас в подчинении?",
+                "5-7 инженеров.",
+            ),
+            (
+                "Какое количество людей было у вас в подчинении?",
+                "5-7 инженеров.",
+            ),
+        ]
+    )
+    bot_messages.append(
+        {
+            "id": "msg-tail-final",
+            "text": "Какое количество людей было у вас в подчинении?",
+            "author": {"participant_type": "employer"},
+            "created_at": "2026-03-11T17:37:00+03:00",
+        }
+    )
+    gateway = FakeGateway(responses=[bot_messages])
+    service = make_service(monkeypatch, tool, gateway, dry_run=True)
+
+    stats = service.run()
+
+    assert stats.skipped == 1
+    assert stats.replied == 0
+    classifier_instances = FakeLLMClient.by_model(CLASSIFIER_MODEL)
+    reply_instances = FakeLLMClient.by_model(REPLY_MODEL)
+    assert sum(len(i.calls) for i in classifier_instances) == 0
+    assert sum(len(i.calls) for i in reply_instances) == 0

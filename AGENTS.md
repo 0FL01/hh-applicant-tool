@@ -103,6 +103,7 @@ LLM-модуль для автоответов в чатах работодат�
 - Триггер: только неотвеченный хвост сообщений работодателя после последнего кандидата.
 - Debounce: `incoming_collect_seconds` для склейки подряд идущих реплик.
 - Дедупликация: `(negotiation_id, last_message_id)` в `agent_decisions`.
+- Bot loop detection: `_is_bot_loop` — если employer_tail = 1 вопрос и этот же текст уже был в истории с ответом кандидата → skip `bot_loop` (до classifier, 0 токенов).
 - **Stage 1 — Classifier gate** (если включен):
   - `human_actionable` / `bot_actionable` → pass to reply LLM
   - `passive_update` / `marketing_broadcast` / `system_event` / `irrelevant` → skip

@@ -380,6 +380,18 @@ class ChatAgentService:
             )
             return
 
+        if self._is_bot_loop(messages, employer_tail):
+            logger.info(
+                "Negotiation %s bot loop detected, skipping",
+                negotiation["id"],
+            )
+            self._skip(
+                negotiation,
+                reason="bot_loop",
+                last_message=last_message,
+            )
+            return
+
         classification = None
         classifier_reply = None
         if self.classifier_llm is not None:
@@ -1288,6 +1300,26 @@ class ChatAgentService:
         return len(unanswered_messages) > 1 or any(
             marker in combined for marker in markers
         )
+
+    def _is_bot_loop(
+        self, messages: list[dict], employer_tail: list[dict]
+    ) -> bool:
+        if len(employer_tail) != 1:
+            return False
+        question = (employer_tail[0].get("text") or "").strip().lower()
+        if not question:
+            return False
+        for i, msg in enumerate(messages):
+            if msg["author"]["participant_type"] != "employer":
+                continue
+            if (msg.get("text") or "").strip().lower() != question:
+                continue
+            if (
+                i + 1 < len(messages)
+                and messages[i + 1]["author"]["participant_type"] != "employer"
+            ):
+                return True
+        return False
 
     def _render_reply_text(self, decision: dict[str, object]) -> str:
         return "\n\n".join(
