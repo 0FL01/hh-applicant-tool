@@ -2,6 +2,7 @@ import sqlite3
 import sys
 import types
 from types import SimpleNamespace
+from pathlib import Path
 
 openai_module = types.ModuleType("openai")
 openai_module.OpenAI = object
@@ -221,6 +222,17 @@ def test_env_excluded_keywords_skip_matching_vacancy_name():
 
     assert api_client.post_calls == []
     assert api_client.put_calls == ["/vacancies/blacklisted/101"]
+
+
+def test_letter_file_short_alias_l_is_supported():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    Operation().setup_parser(parser)
+
+    args = parser.parse_args(["-l", "/app/letter.txt"])
+
+    assert args.letter_file == Path("/app/letter.txt")
 
 
 def test_env_excluded_keywords_do_not_skip_non_matching_vacancy_name():

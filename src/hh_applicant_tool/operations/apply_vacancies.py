@@ -105,6 +105,7 @@ class Operation(BaseOperation):
             type=str,
         )
         parser.add_argument(
+            "-l",
             "-L",
             "--letter-file",
             "--letter",
