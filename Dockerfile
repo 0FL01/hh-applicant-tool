@@ -20,14 +20,12 @@ RUN groupadd -g $GID docker && \
 
 WORKDIR /app
 
-# Копируем файлы пакета (без hh_llm_agent — он для отдельного контейнера)
+# Копируем файлы пакета
 COPY src /app/src
+COPY hh_llm_agent /app/hh_llm_agent
 COPY pyproject.toml poetry.lock* README.md /app/
 
-# Создаем фейковую директорию hh_llm_agent для Poetry
-RUN mkdir -p /app/hh_llm_agent && echo "# Placeholder for Poetry" > /app/hh_llm_agent/__init__.py
-
-# И ставим его (без -e, чтобы не требовался hh_llm_agent)
+# Устанавливаем пакет с зависимостями (включает hh_applicant_tool + hh_llm_agent)
 RUN pip install --no-cache-dir '.[playwright,pillow]'
 
 # Ставим зависимости хромиума и сам браузер в общий кэш
