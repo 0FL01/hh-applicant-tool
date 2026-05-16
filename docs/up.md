@@ -37,17 +37,9 @@
 
 В локале один прокси на всё. Это важно для антидетекта — можно пустить трафик к API HH через российский прокси, а AI-трафик через другой.
 
-### 1.4 Rate Limiting и Retry в AI-клиенте
+### 1.4 Rate Limiting и Retry в AI-клиенте — ✅ СДЕЛАНО
 
-**Апстрим `ai/openai.py` (239 строк):**
-- Rate limiter на thread-локе: 40 RPM по умолчанию, настраивается через `rate_limit`
-- Retry при 429 с парсингом заголовка `Retry-After`, экспоненциальная задержка
-- `max_retries=5`
-
-**Локальный `ai/openai.py` (77 строк):**
-- Нет rate limiting, нет retry — один запрос, без обработки 429.
-
-Даже если у нас есть OpenRouter-клиент для `chat-agent`, старый модуль `ai/` всё ещё используется `apply-vacancies --use-ai` и `reply-employers`. Эти операции будут упираться в лимиты без защиты.
+`ai/openai.py`: добавлены `rate_limit=40`, `max_retries=5`, `_request()` с thread-lock, `_get_retry_delay()` с парсингом `Retry-After`. `send_message()` переписан с retry-циклом. `main.py:get_openai_chat()` обновлён под новую сигнатуру (`api_key`, `base_url`).
 
 ### 1.5 Рефакторинг `main.py`
 
