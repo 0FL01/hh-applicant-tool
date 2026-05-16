@@ -8,10 +8,11 @@ from .base import BaseModel
 class SkippedVacancyModel(BaseModel):
     id: str | None = None
     resume_id: str
-    vacancy_id: str
-    reason: str
+    vacancy_id: int
+    employer_id: int | None = None
+    vacancy_name: str = ""
     alternate_url: str | None = None
-    name: str | None = None
-    employer_name: str | None = None
+    reason: str = "ai_rejected"
+    resume_analysis_mode: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None

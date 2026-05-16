@@ -34,6 +34,22 @@ def _ensure_agent_decision_columns(conn: sqlite3.Connection) -> None:
         logger.info("Добавлена колонка %s.%s", "agent_decisions", column_name)
 
 
+def _ensure_skipped_vacancy_columns(conn: sqlite3.Connection) -> None:
+    existing = _table_columns(conn, "skipped_vacancies")
+    required_columns = {
+        "employer_id": "INTEGER",
+        "vacancy_name": "TEXT",
+        "resume_analysis_mode": "TEXT",
+    }
+    for column_name, column_type in required_columns.items():
+        if column_name in existing:
+            continue
+        conn.execute(
+            f"ALTER TABLE skipped_vacancies ADD COLUMN {column_name} {column_type}"
+        )
+        logger.info("Добавлена колонка skipped_vacancies.%s", column_name)
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     """Создает схему БД"""
     changes_before = conn.total_changes
@@ -42,6 +58,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         (QUERIES_PATH / "schema.sql").read_text(encoding="utf-8")
     )
     _ensure_agent_decision_columns(conn)
+    _ensure_skipped_vacancy_columns(conn)
 
     if conn.total_changes > changes_before:
         logger.info("Применена схема бд")

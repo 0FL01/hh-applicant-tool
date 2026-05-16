@@ -73,11 +73,12 @@ CREATE TABLE IF NOT EXISTS vacancy_response_dedup (
 CREATE TABLE IF NOT EXISTS skipped_vacancies (
     id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))) NOT NULL,
     resume_id TEXT NOT NULL,
-    vacancy_id TEXT NOT NULL,
-    reason TEXT NOT NULL,
+    vacancy_id INTEGER NOT NULL,
+    employer_id INTEGER,
+    vacancy_name TEXT NOT NULL,
     alternate_url TEXT,
-    name TEXT,
-    employer_name TEXT,
+    reason TEXT NOT NULL DEFAULT 'ai_rejected',
+    resume_analysis_mode TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (resume_id, vacancy_id)

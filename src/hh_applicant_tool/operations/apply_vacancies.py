@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from .. import utils
+from .. import ai, utils
 from ..ai.base import AIError
 from ..api import BadResponse, Redirect, datatypes
 from ..api.datatypes import PaginatedItems, SearchVacancy
@@ -89,6 +89,8 @@ class Namespace(BaseNamespace):
     # См.: https://github.com/s3rgeym/hh-applicant-tool/commit/2d117c69930d065af3fb378ad7320060551c42ff
     skip_tests: bool
     work_format: list[str] | None
+    ai_filter: str | None
+    ai_rate_limit: int
 
 
 class Operation(BaseOperation):
@@ -96,6 +98,8 @@ class Operation(BaseOperation):
 
     __aliases__ = ("apply", "apply-similar")
     excluded_keywords_env_name = "HH_APPLY_EXCLUDED_KEYWORDS"
+    ai_filter: str | None = None
+    ai_rate_limit: int = 0
 
     def setup_parser(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--resume-id", help="Идентефикатор резюме")
@@ -185,6 +189,18 @@ class Operation(BaseOperation):
             "--skip-tests",
             help="Пропускать вакансии с тестами вместо попытки их решить (workaround для изменений в API HH.ru)",
             action=argparse.BooleanOptionalAction,
+        )
+        parser.add_argument(
+            "--ai-filter",
+            help="Использовать AI для фильтрации вакансий. Режимы: heavy/light",
+            choices=["heavy", "light"],
+            default=None,
+        )
+        parser.add_argument(
+            "--ai-rate-limit",
+            help="Лимит запросов к AI в минуту для фильтрации",
+            type=int,
+            default=40,
         )
 
         # Дальше идут параметры в точности соответствующие параметрам запроса
@@ -454,8 +470,36 @@ class Operation(BaseOperation):
         self.top_lat = args.top_lat
         self.total_pages = args.total_pages
         self._vacancy_description_cache: dict[str, str] = {}
+        self._resume_analysis_cache: dict[tuple[str, str], str] = {}
         self.openai_chat = (
             tool.get_openai_chat(args.first_prompt) if args.use_ai else None
+        )
+        # AI filter
+        self.ai_filter = args.ai_filter
+        self.ai_rate_limit = args.ai_rate_limit
+        # AI Vacancy Filter instance
+        vf_config = tool.config.get("openai_vacancy_filter", {})
+        vf_token = vf_config.get("api_key") or tool.config.get("openai", {}).get("token")
+        if self.ai_filter and not vf_token:
+            raise ValueError(
+                "Токен для AI-фильтрации не задан. "
+                "Укажите openai_vacancy_filter.api_key в config.json "
+                "или используйте openai.token"
+            )
+        self._vacancy_filter_ai: ai.ChatOpenAI | None = (
+            ai.ChatOpenAI(
+                api_key=vf_token,
+                model=vf_config.get("model", "gpt-4o-mini"),
+                temperature=vf_config.get("temperature", 0.0),
+                max_completion_tokens=vf_config.get("max_completion_tokens", 1000),
+                base_url=(
+                    (vf_config.get("base_url") or "").rstrip("/")
+                    + "/chat/completions"
+                ) if vf_config.get("base_url") else None,
+                session=tool.session,
+            )
+            if self.ai_filter
+            else None
         )
         self._apply_vacancies()
 
@@ -643,6 +687,44 @@ class Operation(BaseOperation):
                         vacancy["alternate_url"],
                     )
                     continue
+
+                # ── AI vacancy filter ─────────────────────────────────────
+                if self.ai_filter:
+                    resume_id = resume["id"]
+                    vacancy_id = vacancy["id"]
+
+                    if self._is_vacancy_already_skipped(resume_id, vacancy_id):
+                        logger.info(
+                            "Пропускаем ранее отклонённую AI вакансию: %s",
+                            vacancy["alternate_url"],
+                        )
+                        continue
+
+                    cache_key = (resume_id, self.ai_filter)
+                    if cache_key not in self._resume_analysis_cache:
+                        if self.ai_filter == "heavy":
+                            analysis = self._analyze_resume_heavy(resume_id)
+                        else:
+                            analysis = self._analyze_resume_light(resume)
+                        self._resume_analysis_cache[cache_key] = analysis
+                    resume_analysis = self._resume_analysis_cache[cache_key]
+
+                    vacancy_context = self._build_vacancy_context(vacancy, self.ai_filter)
+                    suitable = self._ask_ai_suitability(vacancy_context, resume_analysis, self.ai_filter)
+
+                    if not suitable:
+                        logger.info(
+                            "AI-фильтр отклонил вакансию: %s",
+                            vacancy["alternate_url"],
+                        )
+                        if not self.dry_run:
+                            self._save_skipped_vacancy(vacancy, resume_id)
+                        continue
+
+                    logger.debug(
+                        "AI-фильтр пропустил вакансию: %s",
+                        vacancy["alternate_url"],
+                    )
 
                 # Перед откликом выгружаем профиль компании
                 if employer_id and employer_id not in seen_employers:
@@ -872,6 +954,131 @@ class Operation(BaseOperation):
             resume["title"],
         )
         print("✅️ Закончили рассылку откликов для резюме:", resume["title"])
+
+    @property
+    def vacancy_filter_ai(self) -> ai.ChatOpenAI:
+        assert self._vacancy_filter_ai is not None
+        return self._vacancy_filter_ai
+
+    def _save_skipped_vacancy(self, vacancy: SearchVacancy, resume_id: str) -> None:
+        employer = vacancy.get("employer", {})
+        self.tool.storage.skipped_vacancies.remember(
+            resume_id=resume_id,
+            vacancy_id=vacancy["id"],
+            vacancy_name=vacancy.get("name", ""),
+            employer_id=employer.get("id") if employer else None,
+            alternate_url=vacancy.get("alternate_url"),
+            reason="ai_rejected",
+            resume_analysis_mode=self.ai_filter,
+        )
+
+    def _is_vacancy_already_skipped(self, resume_id: str, vacancy_id: str) -> bool:
+        return self.tool.storage.skipped_vacancies.is_skipped(resume_id, vacancy_id)
+
+    def _analyze_resume_heavy(self, resume_id: str) -> str:
+        """Full resume analysis: title, skills, full experience history."""
+        cache_key = (resume_id, "heavy")
+        if cache_key in self._resume_analysis_cache:
+            return self._resume_analysis_cache[cache_key]
+        resume = self.api_client.get(f"/resumes/{resume_id}")
+        parts = [f"Название резюме: {resume.get('title', '')}"]
+        if skills := resume.get("skills", ""):
+            parts.append(f"Навыки: {skills}")
+        if skill_set := resume.get("skill_set", []):
+            parts.append(f"Технологии: {', '.join(s.strip() for s in skill_set if s.strip())}")
+        experience = resume.get("experience", []) or []
+        for exp in experience:
+            company = exp.get("company", "")
+            position = exp.get("position", "")
+            period = f"{exp.get('start') or '?'} — {exp.get('end') or '?'}"
+            desc = (exp.get("description") or "").strip()
+            parts.append(f"• {company} | {position} ({period})")
+            if desc:
+                parts.append(f"  {desc[:500]}")
+        text = "\n".join(parts)
+        self._resume_analysis_cache[cache_key] = text
+        return text
+
+    @staticmethod
+    def _analyze_resume_light(resume_obj: datatypes.Resume) -> str:
+        """Lightweight resume summary from search-result data."""
+        title = resume_obj.get("title", "")
+        return f"Название резюме: {title}"
+
+    def _build_vacancy_context(self, vacancy: SearchVacancy, mode: str) -> str:
+        name = vacancy.get("name", "")
+        employer = vacancy.get("employer", {}).get("name", "")
+        if mode == "heavy":
+            desc = self._get_vacancy_description(vacancy)
+            desc = desc[:2000] if len(desc) > 2000 else desc
+            return f"Название: {name}\nКомпания: {employer}\nОписание: {desc}"
+        else:
+            return f"Название: {name}\nКомпания: {employer}"
+
+    @staticmethod
+    def _build_filter_system_prompt(mode: str, resume_analysis: str) -> str:
+        return (
+            "Определи, подходит ли вакансия кандидату.\n"
+            "Смотри в первую очередь на тип работы (роль), а не на технологии.\n"
+            "Правила:\n"
+            "1. Если работа по сути другая -> suitable = false\n"
+            "2. Если роль совпадает или очень близкая:\n"
+            "   - есть пересечения по задачам или навыкам -> suitable = true\n"
+            "3. Общие технологии сами по себе ничего не значат.\n"
+            "4. Если данных мало -> ориентируйся на название роли\n"
+            "Не пиши объяснения.\n"
+            "Ответ строго JSON:\n"
+            '{"suitable": true} или {"suitable": false}\n'
+            "\n"
+            f"Кандидат:\n{resume_analysis}"
+        )
+
+    @staticmethod
+    def _parse_ai_json_response(response: str) -> bool | None:
+        response = response.strip().lower()
+        if response in ("да", "yes", "true"):
+            return True
+        if response in ("нет", "no", "false"):
+            return False
+        m = re.search(
+            r'\{\s*"suitable"\s*:\s*(true|false)\s*\}',
+            response,
+            re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).lower() == "true"
+        if re.search(r'\bsuitable["\s]*:[^"]*\btrue\b', response, re.IGNORECASE):
+            return True
+        if re.search(r'\bsuitable["\s]*:[^"]*\bfalse\b', response, re.IGNORECASE):
+            return False
+        logger.warning("Could not parse AI filter response: %.200s", response)
+        return None
+
+    def _ask_ai_suitability(self, vacancy_context: str, resume_analysis: str, mode: str) -> bool:
+        system_prompt = self._build_filter_system_prompt(mode, resume_analysis)
+        vf_ai = self.vacancy_filter_ai
+        original_sp = vf_ai.system_prompt
+        vf_ai.system_prompt = system_prompt
+        try:
+            for attempt in range(3):
+                if self.ai_rate_limit > 0:
+                    delay = 60.0 / self.ai_rate_limit
+                    time.sleep(delay)
+                try:
+                    response = vf_ai.send_message(f"Вакансия:\n{vacancy_context}")
+                except AIError:
+                    logger.warning("AI filter call failed, passing vacancy through")
+                    return True
+                result = self._parse_ai_json_response(response)
+                if result is not None:
+                    return result
+                if attempt < 2:
+                    logger.debug("Retrying AI filter parse, attempt %d", attempt + 2)
+                    continue
+            logger.warning("AI filter: could not parse response after 3 attempts, passing through")
+            return True
+        finally:
+            vf_ai.system_prompt = original_sp
 
     def _send_email(self, to: str, subject: str, body: str) -> None:
         cfg = self.tool.config.get("smtp", {})
