@@ -35,7 +35,13 @@ class ChatOpenAI:
     _lock: Lock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self.base_url = self.base_url or DEFAULT_COMPLETION_ENDPOINT
+        # Normalize base_url: if it doesn't end with /chat/completions, append it
+        if self.base_url:
+            self.base_url = self.base_url.rstrip("/")
+            if not self.base_url.endswith("/chat/completions"):
+                self.base_url += "/chat/completions"
+        else:
+            self.base_url = DEFAULT_COMPLETION_ENDPOINT
 
     @property
     def _min_request_interval(self) -> float:
