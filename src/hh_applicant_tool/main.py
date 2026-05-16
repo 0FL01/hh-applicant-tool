@@ -57,6 +57,7 @@ class BaseNamespace(argparse.Namespace):
     delay: float
     user_agent: str
     proxy_url: str
+    openai_proxy_url: str
 
 
 class HHApplicantTool:
@@ -113,6 +114,12 @@ class HHApplicantTool:
             "--proxy-url",
             help="Прокси, используемый для запросов и авторизации",
         )
+        parser.add_argument(
+            "--openai-proxy",
+            "--ai-proxy",
+            dest="openai_proxy_url",
+            help="Отдельный прокси, используемый только для OpenAI чата",
+        )
         subparsers = parser.add_subparsers(help="commands")
         package_dir = Path(__file__).resolve().parent / OPERATIONS
         for _, module_name, _ in iter_modules([str(package_dir)]):
@@ -161,24 +168,60 @@ class HHApplicantTool:
 
         return proxies
 
+    def _get_openai_proxies(self) -> dict[str, str]:
+        """Resolve proxy for AI (OpenAI) requests.
+
+        Precedence:
+          1. CLI --openai-proxy / --ai-proxy  (self.args.openai_proxy_url)
+          2. config.json → openai.proxy_url
+          3. Fall back to general proxies (_get_proxies)
+        """
+        openai_config = self.config.get("openai", {})
+        proxy_url = self.args.openai_proxy_url or openai_config.get("proxy_url")
+        if proxy_url:
+            return {
+                "http": proxy_url,
+                "https": proxy_url,
+            }
+        return self._get_proxies()
+
+    @staticmethod
+    def _create_http_session(
+        proxies: dict[str, str],
+        *,
+        log_label: str,
+    ) -> requests.Session:
+        """Build a requests.Session with proxies, insecure TLS, and desktop UA."""
+        session = requests.Session()
+        session.verify = False
+        if proxies:
+            logger.info("Use proxies for %s: %r", log_label, proxies)
+            session.proxies = proxies
+        session.headers.update({"User-Agent": DEFAULT_DESKTOP_USER_AGENT})
+        return session
+
     @cached_property
     def session(self) -> requests.Session:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-        session = requests.Session()
-        session.verify = False
-
-        if proxies := self._get_proxies():
-            logger.info("Use proxies for requests: %r", proxies)
-            session.proxies = proxies
+        session = self._create_http_session(
+            self._get_proxies(),
+            log_label="requests",
+        )
 
         session.cookies = HHOnlyCookieJar(str(self.cookies_file))
         if self.cookies_file.exists():
             session.cookies.load(ignore_discard=True, ignore_expires=True)
 
-        session.headers.update({"User-Agent": DEFAULT_DESKTOP_USER_AGENT})
-
         return session
+
+    @cached_property
+    def openai_session(self) -> requests.Session:
+        """Separate HTTP session for OpenAI/AI requests with its own proxy."""
+        return self._create_http_session(
+            self._get_openai_proxies(),
+            log_label="OpenAI requests",
+        )
 
     @cached_property
     def config_path(self) -> Path:
@@ -311,7 +354,7 @@ class HHApplicantTool:
             max_completion_tokens=c.get("max_completion_tokens", 1000),
             system_prompt=system_prompt,
             base_url=c.get("completion_endpoint"),
-            session=self.session,
+            session=self.openai_session,
         )
 
     # TODO: вынести в миксин какой
