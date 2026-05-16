@@ -296,141 +296,113 @@ docker@1897bdd7c80b:/app$
 
 ---
 
-## Запуск LLM-агента через Docker
+## Модульный запуск через Docker
 
-Для запуска LLM-агента используется отдельный Dockerfile и docker-compose, которые не требуют установки Chromium и других тяжеловесных зависимостей.
+Все три сервиса описаны в **едином** `docker-compose.yml`. Запускать их можно по отдельности 
+или все сразу — один другому не мешает.
 
-### Сборка образа
-
-```sh
-docker compose -f docker-compose.llm-agent.yml build
-```
-
-### Настройка
-
-Скопируйте пример конфига и настройте его:
+Сборка образов:
 
 ```sh
-cp .env.example .env
+docker compose build
+
+# Или только конкретный сервис (быстрее):
+docker compose build llm_agent
 ```
 
-В `.env` обязательно укажите:
+### LLM-агент (автоответы в чатах)
+
+Лёгкий контейнер без Chromium, использует `Dockerfile.llm-agent`.
+
+**Daemon-режим** (фоновая работа):
 
 ```sh
-OPENROUTER_API_KEY=your_openrouter_api_key_here
+docker compose up -d llm_agent
 ```
 
-### Запуск агента в режиме dry-run
-
-Для безопасного тестирования без реальной отправки сообщений (переопределяем команду):
+**Разовый dry-run** (тестирование без отправки сообщений):
 
 ```sh
-docker compose -f docker-compose.llm-agent.yml run --rm llm_agent chat-agent --dry-run --limit 5
+docker compose run --rm llm_agent chat-agent --dry-run --limit 5
 ```
 
-Или с временным включением dry-run через переменную окружения:
+**Логи:**
 
 ```sh
-docker compose -f docker-compose.llm-agent.yml run --rm -e CHAT_AGENT_DRY_RUN=true llm_agent chat-agent --limit 5
+docker compose logs -f llm_agent
 ```
 
-### Демонный запуск (background)
+Настройка: в `.env` укажите `OPENAI_API_KEY` (или `OPENROUTER_API_KEY`).
 
-Для постоянного запуска агента в фоне контейнер стартует `chat-agent --daemon` и работает, пока запущен контейнер:
+### Telegram contact collector
+
+Приёмник webhook `recruiter_contact_offer`. Сохраняет контакты рекрутеров в SQLite 
+и пересылает уведомление в Telegram Bot API.
+
+**Запуск:**
 
 ```sh
-docker compose -f docker-compose.llm-agent.yml up -d llm_agent
+docker compose up -d tg_contact_collector
 ```
 
-Просмотр логов:
+**Логи:**
 
 ```sh
-docker compose -f docker-compose.llm-agent.yml logs -f llm_agent
+docker compose logs -f tg_contact_collector
 ```
 
-Остановка:
+**Необходимые переменные в `.env`:**
 
-```sh
-docker compose -f docker-compose.llm-agent.yml down
-```
-
-### Пересборка образа после изменений
-
-```sh
-docker compose -f docker-compose.llm-agent.yml up -d --build llm_agent
-```
-
-### Особенности
-
-- Контейнер работает от пользователя `llmagent` (UID/GID 1000 по умолчанию, можно изменить через `UID`/`GID` build args)
-- Конфиги и база данных хранятся в `config/` как и при локальном запуске (через volume mount `.:/app`)
-- По умолчанию контейнер запускает именно daemon-режим агента (`chat-agent --daemon`)
-- Частота опроса задается через `CHAT_AGENT_POLL_INTERVAL` (по умолчанию 60 секунд)
-- Между batch-циклами агент спит случайно в окне `CHAT_AGENT_SLEEP_MIN_MINUTES`-`CHAT_AGENT_SLEEP_MAX_MINUTES` (по умолчанию 20-30 минут)
-- По умолчанию включен ночной quiet window `23:00-08:00` по `Europe/Moscow`; переопределяется через `CHAT_AGENT_QUIET_HOURS*`
-- Подряд идущие сообщения работодателя агент старается склеить в один входящий пакет через `CHAT_AGENT_INCOMING_COLLECT_SECONDS`
-- Для screening-ботов агент умеет планировать Q/A-серию из 2-3 коротких сообщений с jitter между частями
-- Модель по умолчанию: `google/gemini-3.1-flash-lite-preview`
-- При использовании `run --rm` с другими командами (например, `--dry-run`) стандартная daemon-команда переопределяется
--
-## Запуск Telegram collector через Docker
--
-Легкий HTTP-приемник webhook `recruiter_contact_offer`, который сохраняет лид в отдельную SQLite и пересылает уведомление через Telegram Bot API. Копит контакты рекрутеров и пересылает их вам в Telegram для самостоятельного начала диалога.
--
-### Сборка образа
--
-```sh
-docker compose -f docker-compose.llm-agent.yml build
-```
--
-### Настройка
--
-В `.env` обязательно укажите:
--
 ```sh
 TELEGRAM_COLLECTOR_BOT_TOKEN=123456:telegram-bot-token
 TELEGRAM_COLLECTOR_TARGET_CHAT_ID=123456789
 TELEGRAM_COLLECTOR_WEBHOOK_SECRET=supersecret
 ```
--
-### Запуск коллектора
--
-```sh
-docker compose -f docker-compose.llm-agent.yml up -d tg_contact_collector
-```
--
-Просмотр логов:
--
-```sh
-docker compose -f docker-compose.llm-agent.yml logs -f tg_contact_collector
-```
--
-Остановка:
--
-```sh
-docker compose -f docker-compose.llm-agent.yml down
-```
--
-### Связка с chat-agent
--
-Чтобы chat-agent отправлял `recruiter_contact_offer` webhook на коллектор, укажите в `.env`:
--
+
+**Связка с chat-agent:** чтобы агент отправлял webhook на коллектор, укажите в `.env`:
+
 ```sh
 CHAT_AGENT_WEBHOOK_URL=http://tg_contact_collector:8787/webhooks/hh/recruiter-contact-offer
 CHAT_AGENT_WEBHOOK_ENABLED=true
 CHAT_AGENT_WEBHOOK_SECRET=supersecret
 ```
--
-### Особенности
--
-- Контейнер работает от пользователя `llmagent` (UID/GID 1000 по умолчанию)
-- Коллектор слушает webhook на порту `8787` по умолчанию
-- Путь к SQLite-файлу лидов: `config/<profile>/tg_collector.sqlite3`
-- Поддерживает idempotency по `X-Idempotency-Key` и дедупликацию в SQLite
-- При сбоях Telegram Bot API возвращает 5xx, и chat-agent сам ретраит доставку
-- Уведомление в Telegram — простое текстовое сообщение без markdown/HTML для надежности
-- Бот должен быть запущен командой `/start` у него в личку, прежде чем сможет отправлять сообщения
--
+
+### Запуск всех сервисов сразу
+
+```sh
+docker compose up -d
+```
+
+Поднимутся cron-отклики, LLM-агент и Telegram collector.
+
+### Остановка
+
+```sh
+# Конкретный сервис
+docker compose stop llm_agent
+
+# Все
+docker compose down
+```
+
+### Особенности LLM-агента
+
+- Пользователь `llmagent` (UID/GID 1000)
+- Конфиги в `config/` (volume `.:/app`)
+- По умолчанию daemon-режим (`chat-agent --daemon`)
+- Частота опроса: `CHAT_AGENT_POLL_INTERVAL` (default 60 с)
+- Случайная пауза между batch: `CHAT_AGENT_SLEEP_MIN_MINUTES`-`CHAT_AGENT_SLEEP_MAX_MINUTES`
+- Quiet window: `23:00-08:00` Europe/Moscow
+- Склейка подряд идущих сообщений: `CHAT_AGENT_INCOMING_COLLECT_SECONDS`
+- Модель по умолчанию: `google/gemini-3.1-flash-lite-preview`
+
+### Особенности Telegram collector
+
+- Webhook на порту `8787` (только localhost)
+- SQLite лидов: `config/<profile>/tg_collector.sqlite3`
+- Idempotency по `X-Idempotency-Key` + дедупликация
+- Бот требует `/start` в личку перед отправкой
+
 ---
  
 ## Стандартная установка
@@ -811,25 +783,25 @@ hh-applicant-tool apply-vacancies -f --ai
 
 ### OpenAI/ChatGPT
 
-Отредактируйте конфиг:
+Укажите в корне `config.json` универсальные ключи (работают для всех AI-операций):
 
-```sh
-hh-applicant-tool config -e
+```json
+{
+  "api_key": "ВАШ_API_КЛЮЧ",
+  "openai_base_url": "https://api.openai.com/v1"
+}
 ```
 
-Добавьте в него эти строки:
+Можно также использовать старую секцию `openai.*` — она имеет приоритет выше универсальных ключей:
 
 ```json
 {
   "openai": {
     "token": "ВАШ_API_КЛЮЧ_OPENAI",
-    "model": "ВАША_МОДЕЛЬ",
-    // Это дефолтные значения, которые можно переопределить
+    "model": "gpt-4o-mini",
     "temperature": 0.7,
     "max_completion_tokens": 1000,
-    // Вместо ChatGPT можно использовать другие сервисы
-    // Учтите, что при исп-ии Docker нужно указывать 192.168... вместо localhost
-    "completion_endpoint": "http://localhost:3000..."
+    "completion_endpoint": "https://api.openai.com/v1/chat/completions"
   }
 }
 ```
@@ -838,13 +810,16 @@ hh-applicant-tool config -e
 
 ### OpenRouter Chat Agent
 
-Отредактируйте конфиг:
+Можно указать универсальные ключи в корне `config.json` — они подойдут и `chat-agent`, и старым командам:
 
-```sh
-hh-applicant-tool config -e
+```json
+{
+  "api_key": "ВАШ_OPENROUTER_API_KEY",
+  "openai_base_url": "https://openrouter.ai/api/v1"
+}
 ```
 
-Добавьте настройки OpenRouter и агента:
+Или через специфичную секцию `openrouter.*` (имеет приоритет выше универсальной):
 
 ```json
 {

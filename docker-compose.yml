@@ -1,4 +1,23 @@
+# Единый docker-compose.yml для всех сервисов HH Applicant Tool.
+#
+# Содержит 3 сервиса, которые можно запускать вместе или по отдельности:
+#   hh_applicant_tool  — основной (cron: отклики, обновление резюме)
+#   llm_agent          — LLM-агент для автоответов в чатах (daemon)
+#   tg_contact_collector — HTTP-приемник recruiter_contact_offer webhook
+#
+# Запуск всех сервисов:   docker compose up -d
+# Запуск одного сервиса:  docker compose up -d hh_applicant_tool
+#                         docker compose up -d llm_agent
+#                         docker compose up -d tg_contact_collector
+# Логи одного сервиса:    docker compose logs -f llm_agent
+# Разовый запуск команды: docker compose run --rm llm_agent chat-agent --dry-run
+
 services:
+
+  # ============================================================
+  # Основной сервис: cron-отклики и обновление резюме
+  # Использует Dockerfile (с Chromium для авторизации)
+  # ============================================================
   hh_applicant_tool:
     container_name: hh_applicant_tool
     image: hh_applicant_tool:latest
@@ -13,9 +32,56 @@ services:
     env_file:
       - .env
     environment:
-      # Это не трогаем
       - CONFIG_DIR=/app/config
-      # Смените или закомментируйте при проблемах
       - TERM=${TERM}
       # Если время на сервере отличается
       # - TZ=Europe/Moscow
+
+  # ============================================================
+  # LLM-агент: автоответы в чатах работодателей
+  # Использует Dockerfile.llm-agent (лёгкий, без Chromium)
+  # ============================================================
+  llm_agent:
+    container_name: hh_llm_agent
+    image: hh_llm_agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.llm-agent
+    volumes:
+      - .:/app
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["-v", "chat-agent", "--daemon"]
+    environment:
+      - CONFIG_DIR=/app/config
+      - TERM=${TERM}
+      # - TZ=Europe/Moscow
+      # - CHAT_AGENT_DRY_RUN=true
+      - CHAT_AGENT_POLL_INTERVAL=${CHAT_AGENT_POLL_INTERVAL:-60}
+
+  # ============================================================
+  # Telegram contact collector: приём recruiter_contact_offer webhook
+  # Использует тот же Dockerfile.llm-agent, но другую команду
+  # ============================================================
+  tg_contact_collector:
+    container_name: hh_tg_contact_collector
+    image: hh_llm_agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.llm-agent
+    volumes:
+      - .:/app
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["-v", "tg-contact-collector"]
+    environment:
+      - CONFIG_DIR=/app/config
+      - TERM=${TERM}
+      - TELEGRAM_COLLECTOR_LISTEN_HOST=${TELEGRAM_COLLECTOR_LISTEN_HOST:-0.0.0.0}
+      - TELEGRAM_COLLECTOR_LISTEN_PORT=${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}
+    ports:
+      - "127.0.0.1:${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}:${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}"
