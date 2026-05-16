@@ -8,11 +8,22 @@ TELEGRAM_URL_RE = re.compile(
     r"(?:https?://)?(?:t\.me|telegram\.me)/[A-Za-z0-9_]{3,}",
     re.IGNORECASE,
 )
+TELEMOST_URL_RE = re.compile(
+    r"https://telemost\.yandex\.ru/[A-Za-z0-9_/-]+",
+    re.IGNORECASE,
+)
 URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 PHONE_RE = re.compile(r"\+?[\d][\d\s().-]{8,}[\d]")
 
 
 def _normalize_telegram_url(value: str) -> str:
+    value = value.strip().rstrip(".,);]")
+    if value.lower().startswith("http"):
+        return value
+    return f"https://{value}"
+
+
+def _normalize_telemost_url(value: str) -> str:
     value = value.strip().rstrip(".,);]")
     if value.lower().startswith("http"):
         return value
@@ -51,6 +62,8 @@ def _extract_signature_name(lines: list[str]) -> str | None:
             continue
         if EMAIL_RE.search(line) or TELEGRAM_URL_RE.search(line):
             continue
+        if TELEMOST_URL_RE.search(line):
+            continue
         if URL_RE.search(line) or _normalize_phone(line):
             continue
         return line
@@ -66,10 +79,16 @@ def extract_contact_details(text: str) -> dict[str, object]:
             for match in TELEGRAM_URL_RE.finditer(text)
         }
     )
+    telemost_urls = sorted(
+        {
+            _normalize_telemost_url(match.group(0))
+            for match in TELEMOST_URL_RE.finditer(text)
+        }
+    )
     all_urls = {
         _normalize_url(match.group(0)) for match in URL_RE.finditer(text)
     }
-    urls = sorted(all_urls - set(telegram_urls))
+    urls = sorted(all_urls - set(telegram_urls) - set(telemost_urls))
     phones = sorted(
         {
             normalized
@@ -85,6 +104,7 @@ def extract_contact_details(text: str) -> dict[str, object]:
         for line in lines
         if EMAIL_RE.search(line)
         or TELEGRAM_URL_RE.search(line)
+        or TELEMOST_URL_RE.search(line)
         or URL_RE.search(line)
         or _normalize_phone(line)
         or ":" in line
@@ -102,6 +122,7 @@ def extract_contact_details(text: str) -> dict[str, object]:
         "emails": emails,
         "telegram_urls": telegram_urls,
         "telegram_handles": telegram_handles,
+        "telemost_urls": telemost_urls,
         "phones": phones,
         "urls": urls,
         "contact_lines": contact_lines,

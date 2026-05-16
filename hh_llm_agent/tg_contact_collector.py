@@ -297,6 +297,7 @@ class TelegramContactCollectorService:
             from_message.get("telegram_handles")
         )
         telegram_urls = self._string_list(from_message.get("telegram_urls"))
+        telemost_urls = self._string_list(from_message.get("telemost_urls"))
         emails = self._string_list(from_message.get("emails"))
         phones = self._string_list(from_message.get("phones"))
         urls = self._string_list(from_message.get("urls"))
@@ -320,6 +321,8 @@ class TelegramContactCollectorService:
             )
         if telegram_urls:
             parts.append("Telegram URL: " + ", ".join(telegram_urls))
+        if telemost_urls:
+            parts.append("Видеозвонок: " + ", ".join(telemost_urls))
         if emails:
             parts.append("Email: " + ", ".join(emails))
         if phones:

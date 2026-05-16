@@ -58,6 +58,9 @@
         "https://t.me/ITHubRecruit"
       ],
       "telegram_handles": [],
+      "telemost_urls": [
+        "https://telemost.yandex.ru/call/abc123def456"
+      ],
       "phones": [
         "+79161234567",
         "+79039876543"
@@ -122,6 +125,7 @@ curl -X POST \
 | `employer.name` | Название работодателя | `"АйТиХаб (IT-Hub)"` |
 | `contacts.from_message.signature_name` | Имя рекрутера из подписи | `"Алексей Петров, Team Lead Backend"` |
 | `contacts.from_message.telegram_urls` | Telegram URL из сообщения | `"https://t.me/ITHubRecruit"` |
+| `contacts.from_message.telemost_urls` | Yandex Telemost ссылка | `"https://telemost.yandex.ru/call/abc123def456"` |
 
 ## Что ожидает третий уровень (llm-tg-assistant)
 
