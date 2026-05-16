@@ -233,6 +233,21 @@ class OpenRouterChatClient:
             ),
         )
 
+    def send_message(
+        self, message: str, system_prompt: str | None = None
+    ) -> str:
+        """Send a single user message and get a plain text response.
+
+        This is a compatibility shim for the old ChatOpenAI interface.
+        Accepts an optional system_prompt for the old path callers.
+        """
+        messages: list[dict[str, Any]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": message})
+        reply = self._create(messages)
+        return reply.content
+
     def complete_json(
         self,
         messages: list[dict[str, Any]],

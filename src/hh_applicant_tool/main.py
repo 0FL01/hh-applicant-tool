@@ -19,7 +19,7 @@ from typing import Any, Iterable
 import requests
 import urllib3
 
-from . import ai, api, utils
+from . import api, utils
 from .storage import StorageFacade
 from .utils.cookiejar import HHOnlyCookieJar
 from .utils.log import setup_logger
@@ -343,7 +343,15 @@ class HHApplicantTool:
                 f"Сессионные куки имеют неправильный тип: {type(self.session.cookies)}"
             )
 
-    def get_openai_chat(self, system_prompt: str) -> ai.ChatOpenAI:
+    def get_openai_chat(self, system_prompt: str) -> Any:
+        """Get an AI chat client configured for the old path (cover letters, replies).
+
+        Returns OpenRouterChatClient for unified AI interface.
+        The system_prompt argument is passed through to send_message() call sites.
+        """
+        from hh_llm_agent.config import OpenRouterConfig
+        from hh_llm_agent.openrouter import OpenRouterChatClient
+
         c = self.config.get("openai", {})
         # Fallback chain: openai.token → universal api_key → env
         token = c.get("token") or self.config.get("api_key") or getenv("OPENAI_API_KEY")
@@ -352,21 +360,27 @@ class HHApplicantTool:
                 "Токен для OpenAI не задан. Укажите api_key в config.json "
                 "или установите OPENAI_API_KEY"
             )
-        # Fallback chain: openai.completion_endpoint → universal openai_base_url → env → default
+        # Fallback chain: openai.completion_endpoint → universal openai_base_url → env
         base_url = (
             c.get("completion_endpoint")
             or self.config.get("openai_base_url")
             or getenv("OPENAI_BASE_URL")
         )
-        return ai.ChatOpenAI(
+
+        config = OpenRouterConfig(
             api_key=token,
+            base_url=base_url,
             model=c.get("model"),
             temperature=c.get("temperature", 0.7),
             max_completion_tokens=c.get("max_completion_tokens", 1000),
-            system_prompt=system_prompt,
-            base_url=base_url,
-            session=self.openai_session,
+            reasoning_enabled=False,
         )
+        if hasattr(self, "openai_session") and self.openai_session.proxies:
+            prox = self.openai_session.proxies
+            if prox.get("http") or prox.get("https"):
+                config.proxies = dict(prox)
+
+        return OpenRouterChatClient(config)
 
     # TODO: вынести в миксин какой
     def _extract_xsrf_token(self, content: str) -> str:

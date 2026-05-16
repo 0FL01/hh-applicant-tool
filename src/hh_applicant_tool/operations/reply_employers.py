@@ -6,7 +6,7 @@ import random
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from ..ai.base import AIError
+from hh_llm_agent.openrouter import OpenRouterError
 from ..api import ApiError, datatypes
 from ..main import BaseNamespace, BaseOperation
 from ..utils.date import parse_api_datetime
@@ -264,7 +264,7 @@ class Operation(BaseOperation):
                                 ai_query
                             )
                             logger.debug(f"AI message: {send_message}")
-                        except AIError as ex:
+                        except OpenRouterError as ex:
                             logger.warning(
                                 f"Ошибка OpenAI для чата {nid}: {ex}"
                             )

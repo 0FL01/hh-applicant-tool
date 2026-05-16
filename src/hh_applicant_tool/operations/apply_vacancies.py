@@ -17,8 +17,9 @@ from urllib.parse import urlparse
 
 import requests
 
-from .. import ai, utils
-from ..ai.base import AIError
+from .. import utils
+from hh_llm_agent.openrouter import OpenRouterChatClient, OpenRouterError
+from hh_llm_agent.config import OpenRouterConfig
 from ..api import BadResponse, Redirect, datatypes
 from ..api.datatypes import PaginatedItems, SearchVacancy
 from ..api.errors import ApiError, LimitExceeded
@@ -498,17 +499,22 @@ class Operation(BaseOperation):
                 "Укажите openai_vacancy_filter.api_key в config.json, "
                 "openai.token или универсальный api_key"
             )
-        self._vacancy_filter_ai: ai.ChatOpenAI | None = (
-            ai.ChatOpenAI(
+        # Resolve proxies from tool.openai_session if available
+        vf_proxies: dict[str, str] | None = None
+        if hasattr(tool, "openai_session") and tool.openai_session.proxies:
+            prox = tool.openai_session.proxies
+            if prox.get("http") or prox.get("https"):
+                vf_proxies = dict(prox)
+        self._vacancy_filter_ai: OpenRouterChatClient | None = (
+            OpenRouterChatClient(OpenRouterConfig(
                 api_key=vf_token,
+                base_url=vf_base_url,
                 model=vf_config.get("model", "gpt-4o-mini"),
                 temperature=vf_config.get("temperature", 0.0),
                 max_completion_tokens=vf_config.get("max_completion_tokens", 1000),
-                base_url=(
-                    vf_base_url.rstrip("/") + "/chat/completions"
-                ) if vf_base_url else None,
-                session=tool.session,
-            )
+                reasoning_enabled=False,
+                proxies=vf_proxies,
+            ))
             if self.ai_filter
             else None
         )
@@ -956,7 +962,7 @@ class Operation(BaseOperation):
                 logger.warning("Достигли лимита на отклики")
             except ApiError as ex:
                 logger.warning(ex)
-            except (BadResponse, AIError) as ex:
+            except (BadResponse, OpenRouterError) as ex:
                 logger.error(ex)
 
         logger.info(
@@ -967,7 +973,7 @@ class Operation(BaseOperation):
         print("✅️ Закончили рассылку откликов для резюме:", resume["title"])
 
     @property
-    def vacancy_filter_ai(self) -> ai.ChatOpenAI:
+    def vacancy_filter_ai(self) -> OpenRouterChatClient:
         assert self._vacancy_filter_ai is not None
         return self._vacancy_filter_ai
 
@@ -1068,28 +1074,26 @@ class Operation(BaseOperation):
     def _ask_ai_suitability(self, vacancy_context: str, resume_analysis: str, mode: str) -> bool:
         system_prompt = self._build_filter_system_prompt(mode, resume_analysis)
         vf_ai = self.vacancy_filter_ai
-        original_sp = vf_ai.system_prompt
-        vf_ai.system_prompt = system_prompt
-        try:
-            for attempt in range(3):
-                if self.ai_rate_limit > 0:
-                    delay = 60.0 / self.ai_rate_limit
-                    time.sleep(delay)
-                try:
-                    response = vf_ai.send_message(f"Вакансия:\n{vacancy_context}")
-                except AIError:
-                    logger.warning("AI filter call failed, passing vacancy through")
-                    return True
-                result = self._parse_ai_json_response(response)
-                if result is not None:
-                    return result
-                if attempt < 2:
-                    logger.debug("Retrying AI filter parse, attempt %d", attempt + 2)
-                    continue
-            logger.warning("AI filter: could not parse response after 3 attempts, passing through")
-            return True
-        finally:
-            vf_ai.system_prompt = original_sp
+        for attempt in range(3):
+            if self.ai_rate_limit > 0:
+                delay = 60.0 / self.ai_rate_limit
+                time.sleep(delay)
+            try:
+                response = vf_ai.send_message(
+                    f"Вакансия:\n{vacancy_context}",
+                    system_prompt=system_prompt,
+                )
+            except OpenRouterError:
+                logger.warning("AI filter call failed, passing vacancy through")
+                return True
+            result = self._parse_ai_json_response(response)
+            if result is not None:
+                return result
+            if attempt < 2:
+                logger.debug("Retrying AI filter parse, attempt %d", attempt + 2)
+                continue
+        logger.warning("AI filter: could not parse response after 3 attempts, passing through")
+        return True
 
     def _send_email(self, to: str, subject: str, body: str) -> None:
         cfg = self.tool.config.get("smtp", {})
