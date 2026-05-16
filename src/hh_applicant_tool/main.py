@@ -305,12 +305,12 @@ class HHApplicantTool:
         if not (token := c.get("token")):
             raise ValueError("Токен для OpenAI не задан")
         return ai.ChatOpenAI(
-            token=token,
+            api_key=token,
             model=c.get("model"),
             temperature=c.get("temperature", 0.7),
             max_completion_tokens=c.get("max_completion_tokens", 1000),
             system_prompt=system_prompt,
-            completion_endpoint=c.get("completion_endpoint"),
+            base_url=c.get("completion_endpoint"),
             session=self.session,
         )
 
