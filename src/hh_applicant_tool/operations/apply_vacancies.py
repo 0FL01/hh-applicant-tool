@@ -479,12 +479,24 @@ class Operation(BaseOperation):
         self.ai_rate_limit = args.ai_rate_limit
         # AI Vacancy Filter instance
         vf_config = tool.config.get("openai_vacancy_filter", {})
-        vf_token = vf_config.get("api_key") or tool.config.get("openai", {}).get("token")
+        openai_cfg = tool.config.get("openai", {})
+        # api_key: openai_vacancy_filter.api_key → openai.token → universal api_key
+        vf_token = (
+            vf_config.get("api_key")
+            or openai_cfg.get("token")
+            or tool.config.get("api_key")
+        )
+        # base_url: openai_vacancy_filter.base_url → openai.completion_endpoint → universal openai_base_url
+        vf_base_url = (
+            vf_config.get("base_url")
+            or openai_cfg.get("completion_endpoint")
+            or tool.config.get("openai_base_url")
+        )
         if self.ai_filter and not vf_token:
             raise ValueError(
                 "Токен для AI-фильтрации не задан. "
-                "Укажите openai_vacancy_filter.api_key в config.json "
-                "или используйте openai.token"
+                "Укажите openai_vacancy_filter.api_key в config.json, "
+                "openai.token или универсальный api_key"
             )
         self._vacancy_filter_ai: ai.ChatOpenAI | None = (
             ai.ChatOpenAI(
@@ -493,9 +505,8 @@ class Operation(BaseOperation):
                 temperature=vf_config.get("temperature", 0.0),
                 max_completion_tokens=vf_config.get("max_completion_tokens", 1000),
                 base_url=(
-                    (vf_config.get("base_url") or "").rstrip("/")
-                    + "/chat/completions"
-                ) if vf_config.get("base_url") else None,
+                    vf_base_url.rstrip("/") + "/chat/completions"
+                ) if vf_base_url else None,
                 session=tool.session,
             )
             if self.ai_filter

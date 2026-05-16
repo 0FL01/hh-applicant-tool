@@ -188,12 +188,15 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         getattr(args, "openrouter_api_key", None)
         or openrouter_cfg.get("api_key")
         or openrouter_cfg.get("token")
+        or config.get("api_key")
         or getenv("OPENROUTER_API_KEY")
+        or getenv("OPENAI_API_KEY")
     )
     if not api_key:
         raise ValueError(
-            "OpenRouter API key is not configured. Use openrouter.api_key or "
-            "OPENROUTER_API_KEY."
+            "OpenRouter API key is not configured. Use openrouter.api_key, "
+            "top-level api_key in config.json, OPENROUTER_API_KEY "
+            "or OPENAI_API_KEY."
         )
 
     temperature = _env_or_value(
@@ -220,12 +223,13 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         str,
     )
 
-    base_url = _env_or_value(
-        "OPENROUTER_BASE_URL",
-        getattr(args, "openrouter_base_url", None),
-        openrouter_cfg.get("base_url"),
-        DEFAULT_OPENROUTER_BASE_URL,
-        str,
+    base_url = (
+        getattr(args, "openrouter_base_url", None)
+        or openrouter_cfg.get("base_url")
+        or config.get("openai_base_url")
+        or getenv("OPENROUTER_BASE_URL")
+        or getenv("OPENAI_BASE_URL")
+        or DEFAULT_OPENROUTER_BASE_URL
     )
 
     period_days = _env_or_value(

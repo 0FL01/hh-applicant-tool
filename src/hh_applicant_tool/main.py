@@ -345,15 +345,26 @@ class HHApplicantTool:
 
     def get_openai_chat(self, system_prompt: str) -> ai.ChatOpenAI:
         c = self.config.get("openai", {})
-        if not (token := c.get("token")):
-            raise ValueError("Токен для OpenAI не задан")
+        # Fallback chain: openai.token → universal api_key → env
+        token = c.get("token") or self.config.get("api_key") or getenv("OPENAI_API_KEY")
+        if not token:
+            raise ValueError(
+                "Токен для OpenAI не задан. Укажите api_key в config.json "
+                "или установите OPENAI_API_KEY"
+            )
+        # Fallback chain: openai.completion_endpoint → universal openai_base_url → env → default
+        base_url = (
+            c.get("completion_endpoint")
+            or self.config.get("openai_base_url")
+            or getenv("OPENAI_BASE_URL")
+        )
         return ai.ChatOpenAI(
             api_key=token,
             model=c.get("model"),
             temperature=c.get("temperature", 0.7),
             max_completion_tokens=c.get("max_completion_tokens", 1000),
             system_prompt=system_prompt,
-            base_url=c.get("completion_endpoint"),
+            base_url=base_url,
             session=self.openai_session,
         )
 
