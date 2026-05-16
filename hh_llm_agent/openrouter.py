@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from openai import OpenAI
 
 from .config import OpenRouterConfig
@@ -45,14 +46,23 @@ class OpenRouterChatClient:
     ):
         self.config = config
         self._fallback_logged = False
-        self.client = client or OpenAI(
-            base_url=config.base_url,
-            api_key=config.api_key,
-            default_headers={
-                "HTTP-Referer": config.referer,
-                "X-Title": config.app_name,
-            },
-        )
+
+        if client is not None:
+            self.client = client
+        else:
+            kwargs: dict[str, Any] = {
+                "base_url": config.base_url,
+                "api_key": config.api_key,
+                "default_headers": {
+                    "HTTP-Referer": config.referer,
+                    "X-Title": config.app_name,
+                },
+            }
+            if config.proxies:
+                proxy_url = config.proxies.get("https") or config.proxies.get("http")
+                if proxy_url:
+                    kwargs["http_client"] = httpx.Client(proxy=proxy_url)
+            self.client = OpenAI(**kwargs)
 
     def _normalize_content(self, content: Any) -> str:
         if isinstance(content, str):

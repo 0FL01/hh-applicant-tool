@@ -60,6 +60,7 @@ class OpenRouterConfig:
     reasoning_enabled: bool = True
     app_name: str = "hh-applicant-tool"
     referer: str = "https://github.com/s3rgeym/hh-applicant-tool"
+    proxies: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -267,6 +268,13 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
     if dry_run is None:
         dry_run = _parse_env_bool("HH_AGENT_DRY_RUN")
 
+    # Resolve proxies from HHApplicantTool (openai_session proxy chain)
+    proxies = (
+        tool._get_openai_proxies()
+        if hasattr(tool, "_get_openai_proxies")
+        else None
+    )
+
     openrouter = OpenRouterConfig(
         api_key=api_key,
         base_url=base_url,
@@ -302,6 +310,7 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
             openrouter_cfg.get("referer")
             or "https://github.com/s3rgeym/hh-applicant-tool"
         ),
+        proxies=proxies,
     )
 
     classifier_enabled = _env_bool_or_value(
@@ -380,6 +389,7 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
             reasoning_enabled=bool(classifier_reasoning),
             app_name=openrouter.app_name,
             referer=openrouter.referer,
+            proxies=proxies,
         ),
         system_prompt=classifier_system_prompt,
         instruction=classifier_instruction,
