@@ -69,6 +69,19 @@ CREATE TABLE IF NOT EXISTS vacancy_response_dedup (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (resume_id, dedupe_key)
 );
+/* ===================== skipped_vacancies ===================== */
+CREATE TABLE IF NOT EXISTS skipped_vacancies (
+    id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))) NOT NULL,
+    resume_id TEXT NOT NULL,
+    vacancy_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    alternate_url TEXT,
+    name TEXT,
+    employer_name TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (resume_id, vacancy_id)
+);
 /* ===================== negotiations ===================== */
 CREATE TABLE IF NOT EXISTS negotiations (
     id INTEGER PRIMARY KEY,
@@ -185,6 +198,7 @@ CREATE TABLE IF NOT EXISTS resumes (
 -- Чтобы выборка для отправки на сервер по updated_at не тормозила
 CREATE INDEX IF NOT EXISTS idx_vac_upd ON vacancies(updated_at);
 CREATE INDEX IF NOT EXISTS idx_vacancy_response_dedup_resume_key ON vacancy_response_dedup(resume_id, dedupe_key);
+CREATE INDEX IF NOT EXISTS idx_skipped_vacancies_resume ON skipped_vacancies(resume_id, vacancy_id);
 CREATE INDEX IF NOT EXISTS idx_emp_upd ON employers(updated_at);
 CREATE INDEX IF NOT EXISTS idx_neg_upd ON negotiations(updated_at);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_neg ON chat_messages(negotiation_id);
@@ -225,6 +239,13 @@ CREATE TRIGGER IF NOT EXISTS trg_vacancy_response_dedup_updated
 AFTER
 UPDATE ON vacancy_response_dedup BEGIN
 UPDATE vacancy_response_dedup
+SET updated_at = CURRENT_TIMESTAMP
+WHERE id = OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_skipped_vacancies_updated
+AFTER
+UPDATE ON skipped_vacancies BEGIN
+UPDATE skipped_vacancies
 SET updated_at = CURRENT_TIMESTAMP
 WHERE id = OLD.id;
 END;
