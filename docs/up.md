@@ -51,23 +51,19 @@
 
 ### 1.5 Рефакторинг `main.py`
 
-**Апстрим:**
-- Наследуется от `MegaTool(VersionChecker)` — проверка версии на PyPI с почасовым кешированием
-- `_assign_args()` — копирует все CLI-аргументы в `self.*` в рантайме
-- `_create_http_session()` фабрика — чистое создание сессий с изоляцией прокси
-- AI-клиенты под конкретные задачи: `get_cover_letter_ai()`, `get_vacancy_filter_ai()`, `get_captcha_ai()`
-- `constants.py` — централизованные константы (UA, пути, имена файлов)
-- `check_same_thread=False` в `sqlite3.connect()` — избегает проблем с потоками в Docker
+| Область | Статус |
+|---------|--------|
+| `check_same_thread=False` в `sqlite3.connect()` | ✅ СДЕЛАНО |
+| `_create_http_session()` фабрика | Ждёт (Stage-2) |
+| `openai_session` cached_property | Ждёт (Stage-2) |
+| `MegaTool(VersionChecker)` — версия на PyPI | Не портируем (локально удалён телеметрический слой) |
+| `_assign_args()` | Не портируем (локально `self.args` pattern) |
+| `constants.py` | Ждёт (Stage-2, как часть рефакторинга) |
+| AI-клиенты под задачи: `get_cover_letter_ai()` и др. | Ждёт |
 
-**Локальный:**
-- Просто `HHApplicantTool`, без базовых классов
-- Константы вкодом
-- Один `get_openai_chat()` который возвращает минимальный `ChatOpenAI` без рейт-лимитинга
-- Нет `check_same_thread=False` — потенциальная проблема в многопоточном контексте агента
+### 1.6 `api/client.py` — Мелкий баг в локале — ✅ СДЕЛАНО
 
-### 1.6 `api/client.py` — Мелкий баг в локале
-
-В локале используется `as_json.decoder.JSONDecodeError` (несуществующий модуль) вместо `json.JSONDecodeError` — упадёт с ошибкой, если парсинг JSON когда-нибудь не удастся.
+`as_json.decoder.JSONDecodeError` → `json.JSONDecodeError`. Добавлен `import json`.
 
 ---
 
