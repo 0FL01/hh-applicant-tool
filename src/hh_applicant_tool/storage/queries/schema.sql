@@ -176,6 +176,81 @@ CREATE TABLE IF NOT EXISTS agent_webhooks (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (negotiation_id, source_last_message_id, event_type)
 );
+/* ===================== mcp_runs ===================== */
+CREATE TABLE IF NOT EXISTS mcp_runs (
+    id TEXT PRIMARY KEY,
+    tool_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    transport TEXT NOT NULL DEFAULT 'stdio',
+    profile_id TEXT NOT NULL,
+    resume_id TEXT,
+    dry_run BOOLEAN NOT NULL DEFAULT 1,
+    confirm_apply BOOLEAN NOT NULL DEFAULT 0,
+    policy_hash TEXT NOT NULL,
+    policy_json TEXT NOT NULL DEFAULT '{}',
+    search_params_json TEXT NOT NULL DEFAULT '{}',
+    model TEXT,
+    total_candidates INTEGER NOT NULL DEFAULT 0,
+    analyzed_count INTEGER NOT NULL DEFAULT 0,
+    planned_apply_count INTEGER NOT NULL DEFAULT 0,
+    applied_count INTEGER NOT NULL DEFAULT 0,
+    skipped_count INTEGER NOT NULL DEFAULT 0,
+    blocked_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    finished_at DATETIME
+);
+/* ===================== vacancy_analysis ===================== */
+CREATE TABLE IF NOT EXISTS vacancy_analysis (
+    id TEXT PRIMARY KEY,
+    run_id TEXT,
+    resume_id TEXT NOT NULL,
+    vacancy_id INTEGER NOT NULL,
+    employer_id INTEGER,
+    dedupe_key TEXT,
+    source TEXT NOT NULL,
+    source_query TEXT,
+    analysis_status TEXT NOT NULL,
+    analysis_mode TEXT NOT NULL,
+    policy_hash TEXT NOT NULL,
+    policy_json TEXT NOT NULL DEFAULT '{}',
+    suitable BOOLEAN NOT NULL,
+    score REAL NOT NULL,
+    reason TEXT NOT NULL,
+    red_flags_json TEXT NOT NULL DEFAULT '[]',
+    missing_json TEXT NOT NULL DEFAULT '[]',
+    recommended_action TEXT NOT NULL,
+    precheck_reasons_json TEXT NOT NULL DEFAULT '[]',
+    model TEXT,
+    raw_response TEXT,
+    reasoning_details TEXT NOT NULL DEFAULT '[]',
+    prompt_hash TEXT,
+    vacancy_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+/* ===================== application_attempts ===================== */
+CREATE TABLE IF NOT EXISTS application_attempts (
+    id TEXT PRIMARY KEY,
+    run_id TEXT,
+    analysis_id TEXT,
+    resume_id TEXT NOT NULL,
+    vacancy_id INTEGER NOT NULL,
+    employer_id INTEGER,
+    dedupe_key TEXT,
+    day_bucket TEXT NOT NULL,
+    dry_run BOOLEAN NOT NULL,
+    confirm_apply BOOLEAN NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    cover_letter_source TEXT NOT NULL,
+    cover_letter_preview TEXT,
+    cover_letter_sha256 TEXT,
+    hh_request_id TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    sent_at DATETIME
+);
 /* ===================== settings ===================== */
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -206,6 +281,18 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_neg ON chat_messages(negotiation_id
 CREATE INDEX IF NOT EXISTS idx_agent_decisions_neg_msg ON agent_decisions(negotiation_id, last_message_id);
 CREATE INDEX IF NOT EXISTS idx_agent_outbox_status_send_after ON agent_outbox(status, send_after);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_created ON agent_runs(created_at);
+CREATE INDEX IF NOT EXISTS idx_mcp_runs_created ON mcp_runs(created_at);
+CREATE INDEX IF NOT EXISTS idx_mcp_runs_status_created ON mcp_runs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_mcp_runs_tool_created ON mcp_runs(tool_name, created_at);
+CREATE INDEX IF NOT EXISTS idx_vacancy_analysis_resume_vacancy_created ON vacancy_analysis(resume_id, vacancy_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_vacancy_analysis_run ON vacancy_analysis(run_id);
+CREATE INDEX IF NOT EXISTS idx_vacancy_analysis_policy ON vacancy_analysis(policy_hash);
+CREATE INDEX IF NOT EXISTS idx_vacancy_analysis_dedupe ON vacancy_analysis(dedupe_key);
+CREATE INDEX IF NOT EXISTS idx_application_attempts_run ON application_attempts(run_id);
+CREATE INDEX IF NOT EXISTS idx_application_attempts_resume_vacancy_created ON application_attempts(resume_id, vacancy_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_application_attempts_resume_dedupe_created ON application_attempts(resume_id, dedupe_key, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_application_attempts_day_status_dry ON application_attempts(day_bucket, status, dry_run);
+CREATE INDEX IF NOT EXISTS idx_application_attempts_status_created ON application_attempts(status, created_at);
 /* ===================== ТРИГГЕРЫ (Всегда обновляют дату) ===================== */
 -- Убрал условие WHEN. Теперь при любом UPDATE дата актуализируется принудительно.
 CREATE TRIGGER IF NOT EXISTS trg_resumes_updated

@@ -4,10 +4,14 @@ import hashlib
 import html
 import logging
 import re
+import uuid
 from typing import Any
 
 from hh_applicant_tool.api.errors import ApiError
 from hh_applicant_tool.context import HHProfileContext
+from hh_applicant_tool.storage.models.vacancy_analysis import (
+    VacancyAnalysisModel,
+)
 from hh_applicant_tool.utils.string import strip_tags
 
 from .policy import VacancyPolicy
@@ -186,6 +190,55 @@ class VacancyResearchService:
             reasons=reasons,
             dedupe_key=dedupe_key,
         )
+
+    def record_precheck_analysis(
+        self,
+        *,
+        resume_id: str,
+        vacancy: dict[str, Any],
+        precheck: PrecheckResult,
+        policy: VacancyPolicy | None = None,
+        run_id: str | None = None,
+        source: str = "manual",
+        source_query: str | None = None,
+        analysis_mode: str = "light",
+    ) -> VacancyAnalysisModel:
+        policy = policy or VacancyPolicy()
+        employer = vacancy.get("employer") or {}
+        analysis = VacancyAnalysisModel(
+            id=uuid.uuid4().hex,
+            run_id=run_id,
+            resume_id=resume_id,
+            vacancy_id=int(vacancy["id"]),
+            employer_id=int(employer["id"]) if employer.get("id") else None,
+            dedupe_key=precheck.dedupe_key,
+            source=source,
+            source_query=source_query,
+            analysis_status="blocked" if precheck.blocked else "ok",
+            analysis_mode=analysis_mode,
+            policy_hash=policy.hash(),
+            policy_json=policy.to_canonical_dict(),
+            suitable=not precheck.blocked,
+            score=0.0 if precheck.blocked else 1.0,
+            reason=(
+                "Hard precheck blocked vacancy"
+                if precheck.blocked
+                else "Hard prechecks passed"
+            ),
+            red_flags_json=list(precheck.reasons),
+            missing_json=[],
+            recommended_action="skip" if precheck.blocked else "review",
+            precheck_reasons_json=list(precheck.reasons),
+            reasoning_details=[{"kind": "hard_precheck"}],
+            vacancy_snapshot_json={
+                "id": vacancy.get("id"),
+                "name": vacancy.get("name"),
+                "alternate_url": vacancy.get("alternate_url"),
+                "employer": employer,
+            },
+        )
+        self.storage.vacancy_analysis.save(analysis)
+        return analysis
 
     def _get_vacancy_description(self, vacancy: dict[str, Any]) -> str:
         vacancy_id = str(vacancy["id"])

@@ -186,3 +186,43 @@ def test_hard_prechecks_return_reasons_and_dedupe_key():
         "work_format_mismatch",
         "dedupe_hit",
     ]
+
+
+def test_service_records_precheck_analysis_audit_row():
+    vacancy = make_vacancy(has_test=True)
+    api_client = FakeApiClient(
+        {
+            "/vacancies/101": {
+                **vacancy,
+                "description": "<p>Build APIs</p>",
+            }
+        }
+    )
+    storage = make_storage()
+    service = VacancyResearchService(make_context(api_client, storage))
+    policy = VacancyPolicy(excluded_keywords=["senior"])
+    precheck = service.run_hard_prechecks(
+        resume_id="resume-1",
+        vacancy=vacancy,
+        policy=policy,
+    )
+
+    analysis = service.record_precheck_analysis(
+        resume_id="resume-1",
+        vacancy=vacancy,
+        precheck=precheck,
+        policy=policy,
+        run_id="run-1",
+        source="search",
+        source_query="python",
+    )
+
+    stored = storage.vacancy_analysis.get(analysis.id)
+    assert stored is not None
+    assert stored.run_id == "run-1"
+    assert stored.analysis_status == "blocked"
+    assert stored.recommended_action == "skip"
+    assert stored.policy_hash == policy.hash()
+    assert stored.policy_json["excluded_keywords"] == ["senior"]
+    assert stored.precheck_reasons_json == ["has_test"]
+    assert stored.vacancy_snapshot_json["id"] == "101"
