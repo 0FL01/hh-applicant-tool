@@ -9,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from hh_applicant_tool.context import HHProfileContext
 
-from .context import MCPServerConfig, MCPRuntime, create_runtime
+from .context import MCPRuntime, create_runtime, load_server_config
 from .tools import register_tools
 
 
@@ -37,9 +37,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     runtime = create_runtime(
         profile=profile,
-        config=MCPServerConfig(
+        config=load_server_config(
+            profile,
             transport=args.transport,
-            allow_apply=args.allow_apply,
+            allow_apply=True if args.allow_apply else None,
             max_applications_per_run=args.max_applications_per_run,
             max_applications_per_day=args.max_applications_per_day,
             request_timeout_seconds=args.request_timeout_seconds,
@@ -61,9 +62,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--transport", choices=["stdio"], default="stdio")
     parser.add_argument("--allow-apply", action="store_true")
     parser.add_argument("--policy-file", type=Path)
-    parser.add_argument("--max-applications-per-run", type=int, default=5)
-    parser.add_argument("--max-applications-per-day", type=int, default=20)
-    parser.add_argument("--request-timeout-seconds", type=float, default=20.0)
+    parser.add_argument("--max-applications-per-run", type=int)
+    parser.add_argument("--max-applications-per-day", type=int)
+    parser.add_argument("--request-timeout-seconds", type=float)
     parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],

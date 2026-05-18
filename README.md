@@ -882,6 +882,112 @@ hh-applicant-tool chat-agent --daemon --sleep-min-minutes 25 --sleep-max-minutes
 
 ---
 
+## MCP server для внешнего AI-агента
+
+`hh-applicant-tool` предоставляет MCP entrypoint для локального stdio-подключения:
+
+```sh
+hh-applicant-mcp --config-dir ./config --profile-id default
+```
+
+Эквивалентный запуск без установленного console script:
+
+```sh
+python -m hh_applicant_tool.mcp.server --config-dir ./config --profile-id default
+```
+
+MCP server работает в одном profile-context и использует те же `config.json`, cookies, SQLite и HH token, что и CLI. Авторизацию через MCP он не выполняет: сначала авторизуйтесь обычной CLI-командой `hh-applicant-tool authorize`.
+
+### Конфигурация
+
+Минимальный `config.json` для анализа вакансий через OpenRouter:
+
+```json
+{
+  "openrouter": {
+    "api_key": "ВАШ_OPENROUTER_API_KEY",
+    "model": "google/gemini-3.1-flash-lite-preview",
+    "base_url": "https://openrouter.ai/api/v1",
+    "temperature": 0.2,
+    "max_completion_tokens": 1200,
+    "reasoning_enabled": true
+  },
+  "mcp": {
+    "allow_apply": false,
+    "max_applications_per_run": 5,
+    "max_applications_per_day": 20
+  },
+  "vacancy_policy": {
+    "must_have": [],
+    "nice_to_have": [],
+    "avoid": [],
+    "dealbreakers": [],
+    "excluded_employers": [],
+    "excluded_keywords": [],
+    "min_score": 0.7,
+    "cover_letter_style": "short",
+    "cover_letter_language": "ru"
+  }
+}
+```
+
+CLI flags override runtime settings:
+
+```sh
+hh-applicant-mcp \
+  --config-dir ./config \
+  --profile-id default \
+  --max-applications-per-run 5 \
+  --max-applications-per-day 20
+```
+
+Real apply is disabled unless the server is started with `--allow-apply`:
+
+```sh
+hh-applicant-mcp --config-dir ./config --profile-id default --allow-apply
+```
+
+Even with `--allow-apply`, destructive tools still require request-side `dry_run=false` and `confirm_apply=true`.
+
+### Tools
+
+Read-only remote tools:
+
+- `hh_whoami`
+- `hh_list_resumes`
+- `hh_search_vacancies`
+- `hh_get_vacancy`
+- `hh_analyze_vacancy`
+- `hh_research_vacancies`
+
+Potentially destructive tools:
+
+- `hh_apply_vacancy`
+- `hh_research_and_apply`
+
+Destructive tools are fail-closed:
+
+- default `dry_run=true`;
+- real HH mutation requires server `--allow-apply`;
+- request must set `dry_run=false` and `confirm_apply=true`;
+- archived vacancies, external response forms, tests, existing relations, local dedupe hits and prior `applied`/`unknown` attempts are blocked;
+- dry-run writes audit but does not write `vacancy_response_dedup`;
+- real success writes `application_attempts` and `vacancy_response_dedup`.
+
+MCP audit is stored in SQLite tables `mcp_runs`, `vacancy_analysis` and `application_attempts`.
+
+MVP limitations:
+
+- only `stdio` transport;
+- one profile per server process;
+- no MCP authorization flow;
+- no CAPTCHA solving;
+- no HH test solving;
+- no remote vacancy blacklisting;
+- no SMTP notifications.
+
+---
+
 ## Шаблоны сообщений
 
 Команды `apply-vacancies` и `reply-employers` поддерживают специальный формат сообщений.

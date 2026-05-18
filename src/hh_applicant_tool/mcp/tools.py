@@ -104,7 +104,7 @@ class MCPToolHandlers:
         policy: dict[str, Any] | None = None,
         force_refresh: bool = False,
     ) -> dict[str, Any]:
-        resolved_policy = parse_policy(policy)
+        resolved_policy = self._policy(policy)
         run_id = self._start_run(
             "hh_analyze_vacancy",
             dry_run=True,
@@ -138,7 +138,7 @@ class MCPToolHandlers:
         policy: dict[str, Any] | None = None,
         max_candidates: int = 20,
     ) -> dict[str, Any]:
-        resolved_policy = parse_policy(policy)
+        resolved_policy = self._policy(policy)
         run_id = self._start_run(
             "hh_research_vacancies",
             dry_run=True,
@@ -172,7 +172,7 @@ class MCPToolHandlers:
             "run_id": run_id,
             "resume_id": resume_id,
             "source": search_result.source,
-            "summary": self._public_research_summary(summary),
+            "summary": self._public_research_summary(summary, results),
             "results": results,
         }
 
@@ -189,7 +189,7 @@ class MCPToolHandlers:
         max_applications_per_run: int | None = None,
         max_applications_per_day: int | None = None,
     ) -> dict[str, Any]:
-        resolved_policy = parse_policy(policy)
+        resolved_policy = self._policy(policy)
         run_id = self._start_run(
             "hh_apply_vacancy",
             dry_run=dry_run,
@@ -239,7 +239,7 @@ class MCPToolHandlers:
         max_applications_per_run: int | None = None,
         max_applications_per_day: int | None = None,
     ) -> dict[str, Any]:
-        resolved_policy = parse_policy(policy)
+        resolved_policy = self._policy(policy)
         run_id = self._start_run(
             "hh_research_and_apply",
             dry_run=dry_run,
@@ -314,6 +314,12 @@ class MCPToolHandlers:
             resume_id=resume_id,
             filters=resolved_filters,
         )
+
+    def _policy(self, overrides: dict[str, Any] | None = None):
+        data = dict(self.runtime.config.default_policy or {})
+        if overrides:
+            data.update(overrides)
+        return parse_policy(data)
 
     def _start_run(
         self,
@@ -395,12 +401,20 @@ class MCPToolHandlers:
             ),
         }
 
-    def _public_research_summary(self, summary: dict[str, int]) -> dict[str, int]:
+    def _public_research_summary(
+        self,
+        summary: dict[str, int],
+        results: list[dict[str, Any]],
+    ) -> dict[str, int]:
         return {
             "fetched": summary["total_candidates"],
             "analyzed": summary["analyzed_count"],
-            "apply_recommended": 0,
-            "review_recommended": 0,
+            "apply_recommended": sum(
+                1 for item in results if item["recommended_action"] == "apply"
+            ),
+            "review_recommended": sum(
+                1 for item in results if item["recommended_action"] == "review"
+            ),
             "skipped": summary["skipped_count"],
             "blocked": summary["blocked_count"],
             "errors": summary["error_count"],

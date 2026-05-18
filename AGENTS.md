@@ -59,7 +59,7 @@ CLI-утилита для автоматизации действий соиск
 ## Development Practices
 
 - **Build**: `poetry build`
-- **Lint**: `ruff check . && pylint src/hh_llm_agent/ src/hh_applicant_tool/`
+- **Lint**: `ruff check . && pylint hh_llm_agent/ src/hh_applicant_tool/`
 - **Test**: `pytest` (chat-agent: `tests/test_chat_agent_service.py`, `tests/test_chat_agent_operation.py`, `tests/test_openrouter_client.py`)
 - **Run**: `python -m hh_applicant_tool <command>` или `hh-applicant-tool <command>`
 

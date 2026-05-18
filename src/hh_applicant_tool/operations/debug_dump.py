@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -196,7 +195,6 @@ def _fetch_all_messages(api, nid: str) -> dict:
 def _has_robot_marker(msg: dict, employer_name: str = "") -> bool:
     """Проверить, содержит ли сообщение маркеры робота-рекрутера."""
     text = (msg.get("text") or "").lower()
-    author = (msg.get("author") or {}).get("participant_type", "").lower()
 
     # Маркеры в тексте
     text_markers = [

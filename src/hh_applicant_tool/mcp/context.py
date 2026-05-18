@@ -7,6 +7,7 @@ from typing import Any
 
 from hh_applicant_tool.context import HHProfileContext
 from hh_applicant_tool.services import VacancyResearchService
+from hh_applicant_tool.utils import json
 from hh_llm_agent.config import (
     DEFAULT_OPENROUTER_BASE_URL,
     DEFAULT_OPENROUTER_MODEL,
@@ -23,6 +24,7 @@ class MCPServerConfig:
     max_applications_per_day: int = 20
     request_timeout_seconds: float = 20.0
     policy_file: Path | None = None
+    default_policy: dict[str, Any] | None = None
     log_level: str = "INFO"
 
 
@@ -54,6 +56,67 @@ def create_runtime(
         service=VacancyResearchService(profile, llm_client=llm_client),
         config=config,
     )
+
+
+def load_server_config(
+    profile: HHProfileContext,
+    *,
+    transport: str = "stdio",
+    allow_apply: bool | None = None,
+    max_applications_per_run: int | None = None,
+    max_applications_per_day: int | None = None,
+    request_timeout_seconds: float | None = None,
+    policy_file: Path | None = None,
+    log_level: str = "INFO",
+) -> MCPServerConfig:
+    mcp_cfg = profile.config.get("mcp", {})
+    policy = dict(profile.config.get("vacancy_policy", {}) or {})
+    resolved_policy_file = policy_file or _resolve_policy_file(
+        profile,
+        mcp_cfg.get("policy_path"),
+    )
+    if resolved_policy_file is not None and resolved_policy_file.exists():
+        with resolved_policy_file.open("r", encoding="utf-8") as fp:
+            policy.update(json.load(fp) or {})
+
+    return MCPServerConfig(
+        transport=transport or mcp_cfg.get("transport", "stdio"),
+        allow_apply=(
+            bool(allow_apply)
+            if allow_apply is not None
+            else bool(mcp_cfg.get("allow_apply", False))
+        ),
+        max_applications_per_run=(
+            max_applications_per_run
+            if max_applications_per_run is not None
+            else int(mcp_cfg.get("max_applications_per_run", 5))
+        ),
+        max_applications_per_day=(
+            max_applications_per_day
+            if max_applications_per_day is not None
+            else int(mcp_cfg.get("max_applications_per_day", 20))
+        ),
+        request_timeout_seconds=(
+            request_timeout_seconds
+            if request_timeout_seconds is not None
+            else float(mcp_cfg.get("request_timeout_seconds", 20.0))
+        ),
+        policy_file=resolved_policy_file,
+        default_policy=policy,
+        log_level=log_level,
+    )
+
+
+def _resolve_policy_file(
+    profile: HHProfileContext,
+    policy_path: str | None,
+) -> Path | None:
+    if not policy_path:
+        return None
+    path = Path(policy_path)
+    if path.is_absolute():
+        return path
+    return profile.config_path / path
 
 
 def _build_llm_client(profile: HHProfileContext) -> OpenRouterChatClient | None:

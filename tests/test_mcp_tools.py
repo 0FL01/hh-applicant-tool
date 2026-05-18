@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import anyio
 
 from hh_applicant_tool.mcp.context import MCPRuntime, MCPServerConfig
+from hh_applicant_tool.mcp.context import load_server_config
 from hh_applicant_tool.mcp.server import build_server
 from hh_applicant_tool.mcp.tools import MCPToolHandlers
 from hh_applicant_tool.storage import StorageFacade
@@ -17,6 +18,8 @@ class FakeProfile:
     def __init__(self):
         self.storage = StorageFacade(sqlite3.connect(":memory:"))
         self.flushed = 0
+        self.api_client = object()
+        self.session = object()
 
     def get_me(self):
         return {
@@ -75,7 +78,10 @@ def make_runtime():
     return MCPRuntime(
         profile=FakeProfile(),
         service=FakeService(),
-        config=MCPServerConfig(allow_apply=False),
+        config=MCPServerConfig(
+            allow_apply=False,
+            default_policy={"min_score": 0.9},
+        ),
     )
 
 
@@ -107,6 +113,7 @@ def test_apply_tool_passes_fail_closed_server_gate():
     assert runtime.service.apply_calls[0]["allow_apply"] is False
     assert runtime.service.apply_calls[0]["dry_run"] is False
     assert runtime.service.apply_calls[0]["confirm_apply"] is True
+    assert runtime.service.apply_calls[0]["policy"].min_score == 0.9
 
 
 def test_build_server_registers_mvp_tools():
@@ -126,3 +133,47 @@ def test_build_server_registers_mvp_tools():
         }.issubset(names)
 
     anyio.run(run)
+
+
+def test_fastmcp_can_call_read_only_tool_end_to_end():
+    async def run():
+        runtime = make_runtime()
+        app = build_server(runtime)
+        _, structured = await app.call_tool("hh_whoami", {})
+
+        assert structured["authenticated"] is True
+        assert structured["profile_id"] == "profile-a"
+        assert runtime.profile.flushed == 2
+
+    anyio.run(run)
+
+
+def test_load_server_config_uses_profile_config_and_policy_file(tmp_path):
+    profile = FakeProfile()
+    profile.config = {
+        "mcp": {
+            "allow_apply": True,
+            "max_applications_per_run": 3,
+            "max_applications_per_day": 9,
+            "request_timeout_seconds": 12,
+            "policy_path": "policy.json",
+        },
+        "vacancy_policy": {"min_score": 0.6, "avoid": ["legacy"]},
+    }
+    profile.config_path = tmp_path
+    (tmp_path / "policy.json").write_text(
+        '{"min_score": 0.8, "excluded_keywords": ["senior"]}',
+        encoding="utf-8",
+    )
+
+    config = load_server_config(profile)
+
+    assert config.allow_apply is True
+    assert config.max_applications_per_run == 3
+    assert config.max_applications_per_day == 9
+    assert config.request_timeout_seconds == 12
+    assert config.default_policy == {
+        "min_score": 0.8,
+        "avoid": ["legacy"],
+        "excluded_keywords": ["senior"],
+    }
