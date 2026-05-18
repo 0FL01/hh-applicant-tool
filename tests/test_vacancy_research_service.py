@@ -458,3 +458,56 @@ def test_apply_vacancy_real_apply_posts_and_persists_dedupe():
     ]
     assert storage.application_attempts.count_applied_for_day("2026-05-18") == 1
     assert storage.vacancy_response_dedup.count_total() == 1
+
+
+def test_apply_vacancy_blocks_stale_analysis_when_dedupe_exists():
+    vacancy = make_vacancy()
+    api_client = FakeApiClient(
+        {
+            "/vacancies/101": {
+                **vacancy,
+                "description": "<p>Build APIs</p>",
+            }
+        }
+    )
+    storage = make_storage()
+    llm = FakeLLMClient(
+        parsed={
+            "suitable": True,
+            "score": 0.95,
+            "reason": "Strong fit",
+            "red_flags": [],
+            "missing": [],
+            "recommended_action": "apply",
+        }
+    )
+    service = VacancyResearchService(
+        make_context(api_client, storage),
+        llm_client=llm,
+    )
+    analysis = service.analyze_vacancy(
+        resume_id="resume-1",
+        vacancy_id="101",
+    )
+    storage.vacancy_response_dedup.remember(
+        resume_id="resume-1",
+        dedupe_key=analysis.dedupe_key,
+        vacancy_id="100",
+        vacancy_name="Previous Backend Engineer",
+        employer_id="501",
+    )
+
+    result = service.apply_vacancy(
+        resume_id="resume-1",
+        vacancy_id="101",
+        analysis_id=analysis.analysis_id,
+        cover_letter_request=CoverLetterRequest(text="Hello"),
+        dry_run=False,
+        confirm_apply=True,
+        allow_apply=True,
+        day_bucket="2026-05-18",
+    )
+
+    assert result.status == "blocked"
+    assert "dedupe_hit" in result.safety_blocks
+    assert api_client.post_calls == []

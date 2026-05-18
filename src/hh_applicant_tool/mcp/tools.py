@@ -1,19 +1,27 @@
 from __future__ import annotations
 
 import uuid
+from contextvars import ContextVar
 from dataclasses import asdict, is_dataclass
 from functools import wraps
 from typing import Any, Callable
 
+import requests
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
+from hh_applicant_tool.api import errors as api_errors
 from hh_applicant_tool.services import VacancySearchResult
 from hh_applicant_tool.storage.models.mcp_run import MCPRunModel
 from hh_applicant_tool.utils import json
 
 from .context import MCPRuntime
 from .schemas import parse_cover_letter, parse_filters, parse_policy
+
+_ACTIVE_RUN_ID: ContextVar[str | None] = ContextVar(
+    "hh_applicant_mcp_run_id",
+    default=None,
+)
 
 
 class MCPToolHandlers:
@@ -348,6 +356,7 @@ class MCPToolHandlers:
                 search_params_json=search_params or {},
             )
         )
+        _ACTIVE_RUN_ID.set(run_id)
         return run_id
 
     def _finish_run(self, run_id: str, *, status: str, **counts: int) -> None:
@@ -356,6 +365,7 @@ class MCPToolHandlers:
             status=status,
             **counts,
         )
+        _ACTIVE_RUN_ID.set(None)
 
     def _analysis_summary(
         self,
@@ -442,6 +452,7 @@ def register_tools(mcp: FastMCP, runtime: MCPRuntime) -> MCPToolHandlers:
             try:
                 return fn(*args, **kwargs)
             except Exception as ex:
+                _mark_active_run_failed(runtime)
                 raise ToolError(json.dumps(_error_envelope(ex))) from ex
             finally:
                 runtime.flush_auth_state()
@@ -459,13 +470,80 @@ def register_tools(mcp: FastMCP, runtime: MCPRuntime) -> MCPToolHandlers:
     return handlers
 
 
+def _mark_active_run_failed(runtime: MCPRuntime) -> None:
+    run_id = _ACTIVE_RUN_ID.get()
+    if not run_id:
+        return
+    try:
+        runtime.profile.storage.mcp_runs.finish(
+            run_id,
+            status="failed",
+            error_count=1,
+        )
+    finally:
+        _ACTIVE_RUN_ID.set(None)
+
+
 def _error_envelope(ex: Exception) -> dict[str, Any]:
+    code = "tool_error"
+    retryable = False
+    details: dict[str, Any] = {}
+
+    if isinstance(ex, ValueError):
+        code = "invalid_request"
+    elif isinstance(ex, api_errors.CaptchaRequired):
+        code = "captcha_required"
+        details["captcha_url"] = ex.captcha_url
+    elif isinstance(ex, api_errors.Forbidden):
+        code = _forbidden_code(ex)
+    elif isinstance(ex, api_errors.ResourceNotFound):
+        code = "not_found"
+    elif isinstance(ex, api_errors.LimitExceeded):
+        code = "rate_limited"
+        retryable = True
+    elif isinstance(ex, api_errors.Redirect):
+        code = "manual_form_required"
+    elif isinstance(ex, api_errors.BadRequest):
+        code = "invalid_request"
+    elif isinstance(ex, api_errors.InternalServerError):
+        code = "upstream_error"
+        retryable = True
+    elif isinstance(ex, api_errors.ClientError):
+        code = "hh_api_error"
+    elif isinstance(ex, requests.Timeout):
+        code = "timeout"
+        retryable = True
+    elif isinstance(ex, requests.RequestException):
+        code = "network_error"
+        retryable = True
+
+    if isinstance(ex, api_errors.ApiError):
+        details = {
+            **details,
+            "status_code": ex.status_code,
+            "errors": ex.data.get("errors", []),
+        }
+
     return {
-        "code": "invalid_request" if isinstance(ex, ValueError) else "tool_error",
+        "code": code,
         "message": str(ex),
-        "retryable": False,
-        "details": {},
+        "retryable": retryable,
+        "details": details,
     }
+
+
+def _forbidden_code(ex: api_errors.Forbidden) -> str:
+    errors = ex.data.get("errors", [])
+    values = {
+        str(item.get("value") or item.get("type") or "").casefold()
+        for item in errors
+    }
+    message = str(ex).casefold()
+    if values & {"token_expired", "invalid_token", "bad_authorization"}:
+        return "auth_expired"
+    if any(marker in message for marker in ("token", "authorization", "oauth")):
+        return "auth_expired"
+    return "forbidden"
 
 
 def _to_dict(value: Any) -> dict[str, Any]:

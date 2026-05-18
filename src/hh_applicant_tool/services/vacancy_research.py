@@ -776,6 +776,11 @@ class VacancyResearchService:
             day_bucket
         ) >= max_applications_per_day:
             blocks.append("daily_limit_reached")
+        if analysis.dedupe_key and self.storage.vacancy_response_dedup.exists(
+            resume_id=analysis.resume_id,
+            dedupe_key=analysis.dedupe_key,
+        ):
+            blocks.append("dedupe_hit")
         if self.storage.application_attempts.latest_blocking_attempt(
             resume_id=analysis.resume_id,
             vacancy_id=analysis.vacancy_id,

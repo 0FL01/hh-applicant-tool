@@ -4,12 +4,16 @@ import sqlite3
 from types import SimpleNamespace
 
 import anyio
+import pytest
+from mcp.server.fastmcp.exceptions import ToolError
+from requests import Request, Response
 
+from hh_applicant_tool.api import errors as api_errors
 from hh_applicant_tool.mcp.context import MCPRuntime, MCPServerConfig
 from hh_applicant_tool.mcp.context import create_runtime
 from hh_applicant_tool.mcp.context import load_server_config
 from hh_applicant_tool.mcp.server import build_server
-from hh_applicant_tool.mcp.tools import MCPToolHandlers
+from hh_applicant_tool.mcp.tools import MCPToolHandlers, _error_envelope
 from hh_applicant_tool.storage import StorageFacade
 
 
@@ -191,3 +195,42 @@ def test_create_runtime_applies_mcp_request_timeout_to_api_client():
     )
 
     assert profile.api_client.timeout == 7.5
+
+
+def test_tool_error_marks_started_mcp_run_failed():
+    async def run():
+        runtime = make_runtime()
+        app = build_server(runtime)
+
+        with pytest.raises(ToolError):
+            await app.call_tool("hh_search_vacancies", {"source": "search"})
+
+        runs = list(runtime.profile.storage.mcp_runs.find())
+        assert len(runs) == 1
+        assert runs[0].tool_name == "hh_search_vacancies"
+        assert runs[0].status == "failed"
+        assert runs[0].error_count == 1
+        assert runtime.profile.flushed == 2
+
+    anyio.run(run)
+
+
+def test_error_envelope_maps_hh_api_errors():
+    response = Response()
+    response.status_code = 403
+    response.request = Request("GET", "https://api.hh.ru/me").prepare()
+    response.headers = {}
+    error = api_errors.Forbidden(
+        response,
+        {
+            "description": "token expired",
+            "errors": [{"type": "oauth", "value": "token_expired"}],
+        },
+    )
+
+    envelope = _error_envelope(error)
+
+    assert envelope["code"] == "auth_expired"
+    assert envelope["retryable"] is False
+    assert envelope["details"]["status_code"] == 403
+    assert envelope["details"]["errors"][0]["value"] == "token_expired"
