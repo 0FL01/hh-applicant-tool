@@ -6,6 +6,9 @@ from typing import Any, Literal
 from hh_applicant_tool.utils.string import bool2str
 
 SearchSource = Literal["search", "similar"]
+AnalysisStatus = Literal["ok", "blocked", "degraded"]
+RecommendedAction = Literal["apply", "skip", "review"]
+AttemptStatus = Literal["planned", "applied", "blocked", "failed", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -94,3 +97,36 @@ class PrecheckResult:
     blocked: bool
     reasons: list[str] = field(default_factory=list)
     dedupe_key: str | None = None
+
+
+@dataclass(frozen=True)
+class VacancyAnalysisResult:
+    analysis_id: str
+    analysis_status: AnalysisStatus
+    resume_id: str
+    vacancy_id: str
+    policy_hash: str
+    model: str | None
+    suitable: bool
+    score: float
+    reason: str
+    red_flags: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    recommended_action: RecommendedAction = "review"
+    precheck_reasons: list[str] = field(default_factory=list)
+    dedupe_key: str | None = None
+
+
+@dataclass(frozen=True)
+class ApplicationAttemptResult:
+    attempt_id: str
+    status: AttemptStatus
+    reason: str
+    analysis_id: str
+    dry_run: bool
+    cover_letter_source: str
+    cover_letter_preview: str | None
+    policy_hash: str
+    dedupe_key: str | None
+    safety_blocks: list[str] = field(default_factory=list)
+    vacancy: dict[str, Any] = field(default_factory=dict)

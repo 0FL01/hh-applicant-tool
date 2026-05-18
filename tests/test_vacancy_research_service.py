@@ -5,6 +5,7 @@ import sqlite3
 from types import SimpleNamespace
 
 from hh_applicant_tool.services import (
+    CoverLetterRequest,
     SearchFilters,
     VacancyPolicy,
     VacancyResearchService,
@@ -16,6 +17,7 @@ class FakeApiClient:
     def __init__(self, responses):
         self.responses = responses
         self.calls = []
+        self.post_calls = []
 
     def get(self, endpoint, params=None, **kwargs):
         self.calls.append((endpoint, params, kwargs))
@@ -26,13 +28,48 @@ class FakeApiClient:
             return self.responses[endpoint]
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
+    def post(self, endpoint, params=None, **kwargs):
+        self.post_calls.append((endpoint, params, kwargs))
+        return {}
+
+
+class FakeLLMReply:
+    def __init__(self, parsed, content='{"ok": true}'):
+        self.parsed = parsed
+        self.content = content
+        self.reasoning_details = [{"step": "fake"}]
+
+
+class FakeLLMClient:
+    def __init__(self, *, parsed=None, error=None, message="Generated letter"):
+        self.parsed = parsed
+        self.error = error
+        self.message = message
+        self.complete_json_calls = []
+        self.send_message_calls = []
+        self.config = SimpleNamespace(model="fake-model")
+
+    def complete_json(self, messages, *, schema):
+        self.complete_json_calls.append((messages, schema))
+        if self.error:
+            raise self.error
+        return FakeLLMReply(self.parsed)
+
+    def send_message(self, message, system_prompt=None):
+        self.send_message_calls.append((message, system_prompt))
+        return self.message
+
 
 def make_storage():
     return StorageFacade(sqlite3.connect(":memory:"))
 
 
 def make_context(api_client, storage):
-    return SimpleNamespace(api_client=api_client, storage=storage)
+    return SimpleNamespace(
+        api_client=api_client,
+        storage=storage,
+        get_resumes=lambda: [{"id": "resume-1", "title": "Backend Engineer"}],
+    )
 
 
 def make_vacancy(
@@ -226,3 +263,198 @@ def test_service_records_precheck_analysis_audit_row():
     assert stored.policy_json["excluded_keywords"] == ["senior"]
     assert stored.precheck_reasons_json == ["has_test"]
     assert stored.vacancy_snapshot_json["id"] == "101"
+
+
+def test_analyze_vacancy_uses_structured_llm_and_persists_audit():
+    vacancy = make_vacancy()
+    api_client = FakeApiClient(
+        {
+            "/vacancies/101": {
+                **vacancy,
+                "description": "<p>Build APIs</p>",
+            }
+        }
+    )
+    storage = make_storage()
+    llm = FakeLLMClient(
+        parsed={
+            "suitable": True,
+            "score": 0.9,
+            "reason": "Good backend match",
+            "red_flags": [],
+            "missing": [],
+            "recommended_action": "apply",
+        }
+    )
+    service = VacancyResearchService(
+        make_context(api_client, storage),
+        llm_client=llm,
+    )
+
+    result = service.analyze_vacancy(
+        resume_id="resume-1",
+        vacancy_id="101",
+        policy=VacancyPolicy(min_score=0.7),
+    )
+
+    assert result.analysis_status == "ok"
+    assert result.recommended_action == "apply"
+    assert result.score == 0.9
+    assert result.model == "fake-model"
+    assert len(llm.complete_json_calls) == 1
+    stored = storage.vacancy_analysis.get(result.analysis_id)
+    assert stored.raw_response == '{"ok": true}'
+    assert stored.reasoning_details == [{"step": "fake"}]
+
+
+def test_analyze_vacancy_degrades_when_llm_is_unavailable():
+    vacancy = make_vacancy()
+    api_client = FakeApiClient(
+        {
+            "/vacancies/101": {
+                **vacancy,
+                "description": "<p>Build APIs</p>",
+            }
+        }
+    )
+    service = VacancyResearchService(make_context(api_client, make_storage()))
+
+    result = service.analyze_vacancy(
+        resume_id="resume-1",
+        vacancy_id="101",
+    )
+
+    assert result.analysis_status == "degraded"
+    assert result.recommended_action == "review"
+    assert result.suitable is False
+
+
+def test_apply_vacancy_dry_run_persists_planned_attempt_without_dedupe():
+    vacancy = make_vacancy()
+    api_client = FakeApiClient(
+        {
+            "/vacancies/101": {
+                **vacancy,
+                "description": "<p>Build APIs</p>",
+            }
+        }
+    )
+    storage = make_storage()
+    llm = FakeLLMClient(
+        parsed={
+            "suitable": True,
+            "score": 0.95,
+            "reason": "Strong fit",
+            "red_flags": [],
+            "missing": [],
+            "recommended_action": "apply",
+        }
+    )
+    service = VacancyResearchService(
+        make_context(api_client, storage),
+        llm_client=llm,
+    )
+
+    result = service.apply_vacancy(
+        resume_id="resume-1",
+        vacancy_id="101",
+        cover_letter_request=CoverLetterRequest(text="Hello"),
+        dry_run=True,
+        day_bucket="2026-05-18",
+    )
+
+    assert result.status == "planned"
+    assert api_client.post_calls == []
+    assert storage.application_attempts.count_total() == 1
+    assert storage.vacancy_response_dedup.count_total() == 0
+
+
+def test_apply_vacancy_real_apply_requires_allow_and_confirm():
+    vacancy = make_vacancy()
+    api_client = FakeApiClient(
+        {
+            "/vacancies/101": {
+                **vacancy,
+                "description": "<p>Build APIs</p>",
+            }
+        }
+    )
+    llm = FakeLLMClient(
+        parsed={
+            "suitable": True,
+            "score": 0.95,
+            "reason": "Strong fit",
+            "red_flags": [],
+            "missing": [],
+            "recommended_action": "apply",
+        }
+    )
+    service = VacancyResearchService(
+        make_context(api_client, make_storage()),
+        llm_client=llm,
+    )
+
+    result = service.apply_vacancy(
+        resume_id="resume-1",
+        vacancy_id="101",
+        cover_letter_request=CoverLetterRequest(text="Hello"),
+        dry_run=False,
+        confirm_apply=False,
+        allow_apply=False,
+        day_bucket="2026-05-18",
+    )
+
+    assert result.status == "blocked"
+    assert result.safety_blocks == [
+        "server_apply_disabled",
+        "confirm_apply_required",
+    ]
+    assert api_client.post_calls == []
+
+
+def test_apply_vacancy_real_apply_posts_and_persists_dedupe():
+    vacancy = make_vacancy()
+    api_client = FakeApiClient(
+        {
+            "/vacancies/101": {
+                **vacancy,
+                "description": "<p>Build APIs</p>",
+            }
+        }
+    )
+    storage = make_storage()
+    llm = FakeLLMClient(
+        parsed={
+            "suitable": True,
+            "score": 0.95,
+            "reason": "Strong fit",
+            "red_flags": [],
+            "missing": [],
+            "recommended_action": "apply",
+        }
+    )
+    service = VacancyResearchService(
+        make_context(api_client, storage),
+        llm_client=llm,
+    )
+
+    result = service.apply_vacancy(
+        resume_id="resume-1",
+        vacancy_id="101",
+        cover_letter_request=CoverLetterRequest(text="Hello"),
+        dry_run=False,
+        confirm_apply=True,
+        allow_apply=True,
+        day_bucket="2026-05-18",
+    )
+
+    assert result.status == "applied"
+    assert api_client.post_calls == [
+        (
+            "/negotiations",
+            {"resume_id": "resume-1", "vacancy_id": "101", "message": "Hello"},
+            {},
+        )
+    ]
+    assert storage.application_attempts.count_applied_for_day("2026-05-18") == 1
+    assert storage.vacancy_response_dedup.count_total() == 1
