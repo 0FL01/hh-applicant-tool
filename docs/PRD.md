@@ -2,7 +2,7 @@
 
 ## 1. Executive Summary
 
-**TL;DR:** Для `hh-applicant-tool` нужен не CLI-wrapper, а отдельный programmatic service-layer и отдельный MCP entrypoint. MVP должен запускаться по `stdio`, работать в одном profile-context, переиспользовать текущие `ApiClient`, `StorageFacade` и `OpenRouterChatClient`, а destructive-операции обязаны идти через `dry_run=true` по умолчанию, `confirm_apply=true`, лимиты, audit и dedupe.
+**TL;DR:** Для `hh-applicant-tool` нужен не CLI-wrapper, а отдельный programmatic service-layer и отдельный MCP entrypoint. MVP должен запускаться по `stdio`, работать в одном profile-context, переиспользовать текущие `ApiClient`, `StorageFacade` и `OpenRouterChatClient`, а destructive-операции обязаны идти через `dry_run=true` по умолчанию, `confirm_apply=true`, лимиты, audit и dedupe. Phase 0 завершена: этот документ является утвержденным design baseline для Phase 1.
 
 Текущий репозиторий уже содержит почти все доменные кирпичи для MCP: HH API client, SQLite persistence, dedupe для вакансий, OpenRouter-compatible LLM client и удачный пример service-layer в `chat-agent`, где CLI только адаптер над `ChatAgentService` (`src/hh_applicant_tool/api/client.py:71-132`, `src/hh_applicant_tool/storage/queries/schema.sql:60-85`, `hh_llm_agent/openrouter.py:22-270`, `src/hh_applicant_tool/operations/chat_agent.py:322-344`, `hh_llm_agent/service.py:118-223`). Но вакансионный flow сейчас устроен иначе: `apply-vacancies` держит бизнес-логику внутри `Operation.run()` и `_apply_resume()`, зависит от `argparse`, мутирует `self`, печатает в stdout и делает дополнительные side effects, не связанные напрямую с целью MCP (`src/hh_applicant_tool/operations/apply_vacancies.py:390-521`, `src/hh_applicant_tool/operations/apply_vacancies.py:561-973`).
 
@@ -388,6 +388,7 @@ Do not reuse directly:
 * **MVP:** `stdio`.
 * **Later:** `Streamable HTTP`.
 * **Do not target in MVP:** legacy standalone SSE.
+* **Python SDK:** official Python `mcp` SDK with `FastMCP`; dependency and entrypoint are added in Phase 5, not Phase 0.
 
 Причины выбора `stdio` для MVP:
 
@@ -2011,7 +2012,7 @@ Need subprocess-level tests to verify:
 
 ## 18. Implementation Plan
 
-### Phase 0 — Recon and design
+### Phase 0 — Recon and design — completed
 
 **Scope**
 
@@ -2025,11 +2026,19 @@ Need subprocess-level tests to verify:
 
 **Acceptance criteria**
 
-* approved design for context/service/MCP/audit/safety.
+* approved design for context/service/MCP/audit/safety;
+* no source-code changes;
+* implementation can proceed with Phase 1.
 
 **Risks**
 
 * underestimating hidden CLI semantics in `apply-vacancies`.
+
+**Outcome**
+
+* Completed in `docs/PRD.md` only.
+* MVP boundaries are fixed: stdio-first, single profile per process, no CLI operation reuse as MCP handlers, destructive tools fail-closed.
+* Next implementation step: Phase 1 — `HHProfileContext` and `HHApplicantTool.from_profile(...)`.
 
 ### Phase 1 — Programmatic context factory
 
@@ -2263,19 +2272,24 @@ Need subprocess-level tests to verify:
 
 ## 19. Open Questions
 
-* Какой MCP Python SDK/library выбрать для implementation?
-* Нужен ли strict one-profile-per-process only, или позже нужен multi-profile server?
-* Должен ли `allow_apply` быть обязательным server startup gate для real apply? Recommendation: yes.
-* Какие exact default limits выбрать для `max_applications_per_run` и `max_applications_per_day`?
+### Resolved in Phase 0
+
+* MCP Python SDK: use official Python `mcp` SDK with `FastMCP` for stdio MVP.
+* Runtime profile model: strict one-profile-per-process in MVP.
+* Real apply gate: require server `allow_apply=true` plus request `dry_run=false` and `confirm_apply=true`.
+* Default limits: `max_applications_per_run=5`, `max_applications_per_day=20`.
+* Default policy storage: support both profile `vacancy_policy` section and optional external `policy_file`.
+* Cover-letter audit: store preview + SHA256, not full generated text.
+* Docker: out of MVP; revisit after stdio stabilization.
+* Batch multi-resume: out of MVP; all MVP research/apply tools require explicit single `resume_id`.
+
+### Remaining
+
 * Какой model использовать по умолчанию для vacancy analysis?
 * Нужен ли отдельный model/config path для cover-letter generation или достаточно reuse analysis model?
-* Где хранить default policy: inline `config.json`, external file, или оба варианта?
-* Хранить ли полный cover letter в SQLite audit, или только preview + hash? Recommendation: preview + hash.
 * Должен ли `skip_blacklisted_employers` быть non-disableable safety default, или configurable preference?
 * Что делать с `status="unknown"` attempt: блокировать auto-retry бессрочно или только until next confirmed relations refresh?
 * Нужен ли в будущем отдельный MCP tool для authorization/token refresh?
-* Нужен ли Dockerfile в том же milestone, или после stabilization of stdio MVP?
-* Нужен ли future tool for batch multi-resume research/apply, или explicit `resume_id` mandatory enough for MVP? Recommendation: explicit single `resume_id` only in MVP.
 * Должен ли MCP reuse legacy `openai.*` config path, или only `openrouter.*` + top-level `api_key`?
 
 ## 20. Acceptance Criteria
