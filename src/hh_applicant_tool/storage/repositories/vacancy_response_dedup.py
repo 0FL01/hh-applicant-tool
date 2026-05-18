@@ -11,6 +11,13 @@ class VacancyResponseDedupRepository(BaseRepository):
     model = VacancyResponseDedupModel
     conflict_columns = ("resume_id", "dedupe_key")
 
+    def exists(self, *, resume_id: str, dedupe_key: str) -> bool:
+        cur = self.conn.execute(
+            f"SELECT 1 FROM {self.table_name} WHERE resume_id = ? AND dedupe_key = ?",
+            (resume_id, dedupe_key),
+        )
+        return cur.fetchone() is not None
+
     def list_vacancy_ids_by_key(self, resume_id: str) -> dict[str, int]:
         cur = self.conn.execute(
             f"SELECT dedupe_key, vacancy_id FROM {self.table_name} WHERE resume_id = ?",

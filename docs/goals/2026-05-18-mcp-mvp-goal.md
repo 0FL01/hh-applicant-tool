@@ -102,6 +102,11 @@ Out of scope:
 - MCP smoke: `hh-applicant-mcp --help` and a subprocess stdio test that proves stdout contains only MCP messages.
 - Done when every command above passes or any intentionally skipped command is documented with the exact blocker and accepted by the user.
 
+## Commit Guidance
+
+- Commit after completing a logical phase or checkpoint.
+- One commit equals one completed meaningful unit of work.
+
 ## Decisions
 
 - 2026-05-18: Use `docs/PRD.md` as the authoritative design baseline for the goal.
@@ -115,6 +120,8 @@ Out of scope:
 
 - 2026-05-18 23:00: Read `docs/PRD.md`, stage docs, `pyproject.toml`, `main.py`, `schema.sql`, and repository file layout. Confirmed upstream-port prerequisites are partly complete and MCP modules are not yet implemented.
 - 2026-05-18 23:05: Created this goal document as the launch contract for future `/goal` work. Next checkpoint is Phase 1 implementation: `HHProfileContext` and `HHApplicantTool.from_profile(...)`.
+- 2026-05-18 23:19: Started Phase 1. Added `src/hh_applicant_tool/context.py`, exported `HHProfileContext`, added `HHApplicantTool.from_profile(...)`, and covered profile path resolution, user-agent persistence, separate OpenAI proxy resolution, and non-CLI shim behavior in `tests/test_context.py`. Verified `pytest tests/test_context.py`, `pytest tests/test_api_client.py`, and `python -m hh_applicant_tool --help`; `ruff` is not available in the current environment (`ruff`, `poetry`, and `python -m ruff` are missing).
+- 2026-05-18 23:23: Started Phase 2 service core. Added `src/hh_applicant_tool/services/` with `SearchFilters`, `VacancyPolicy`, `VacancyResearchService`, search/similar/detail methods, semantic vacancy dedupe key generation, and hard prechecks for archived/manual-form/test/relations/policy/work-format/dedupe blocks. Added `tests/test_vacancy_research_service.py` and `VacancyResponseDedupRepository.exists(...)`. Verified `pytest tests/test_vacancy_research_service.py`, `python -m compileall -q src/hh_applicant_tool/services tests/test_vacancy_research_service.py`, `git diff --check`, and full `pytest` (`70 passed`).
 
 ## Risks and Blockers
 

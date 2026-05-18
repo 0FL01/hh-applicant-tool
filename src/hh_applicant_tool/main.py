@@ -20,6 +20,7 @@ import requests
 import urllib3
 
 from . import api, utils
+from .context import HHProfileContext
 from .storage import StorageFacade
 from .utils.cookiejar import HHOnlyCookieJar
 from .utils.log import setup_logger
@@ -146,6 +147,26 @@ class HHApplicantTool:
         self.config_path.mkdir(
             parents=True,
             exist_ok=True,
+        )
+
+    @staticmethod
+    def from_profile(
+        *,
+        config_dir: str | Path | None = None,
+        profile_id: str | None = None,
+        api_delay: float | None = None,
+        user_agent: str | None = None,
+        proxy_url: str | None = None,
+        openai_proxy_url: str | None = None,
+    ) -> HHProfileContext:
+        """Create a non-CLI profile context for services and integrations."""
+        return HHProfileContext.from_profile(
+            config_dir=config_dir,
+            profile_id=profile_id,
+            api_delay=api_delay,
+            user_agent=user_agent,
+            proxy_url=proxy_url,
+            openai_proxy_url=openai_proxy_url,
         )
 
     def _get_proxies(self) -> dict[str, str]:
