@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import anyio
 
 from hh_applicant_tool.mcp.context import MCPRuntime, MCPServerConfig
+from hh_applicant_tool.mcp.context import create_runtime
 from hh_applicant_tool.mcp.context import load_server_config
 from hh_applicant_tool.mcp.server import build_server
 from hh_applicant_tool.mcp.tools import MCPToolHandlers
@@ -177,3 +178,16 @@ def test_load_server_config_uses_profile_config_and_policy_file(tmp_path):
         "avoid": ["legacy"],
         "excluded_keywords": ["senior"],
     }
+
+
+def test_create_runtime_applies_mcp_request_timeout_to_api_client():
+    profile = FakeProfile()
+    profile.config = {}
+    profile.api_client = SimpleNamespace(timeout=None)
+
+    create_runtime(
+        profile=profile,
+        config=MCPServerConfig(request_timeout_seconds=7.5),
+    )
+
+    assert profile.api_client.timeout == 7.5

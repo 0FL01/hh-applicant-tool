@@ -43,6 +43,7 @@ class BaseClient:
     user_agent: str | None = None
     session: Session | None = None
     delay: float | None = None
+    timeout: float | None = None
     _previous_request_time: float = 0.0
 
     def __post_init__(self) -> None:
@@ -102,6 +103,7 @@ class BaseClient:
                 **payload,
                 headers=self._default_headers(),
                 allow_redirects=False,
+                timeout=self.timeout,
             )
             try:
                 # У этих лошков сервер не отдает Content-Length, а кривое API
@@ -225,6 +227,7 @@ class ApiClient(BaseClient):
             client_secret=self.client_secret,
             user_agent=self.user_agent,
             session=self.session,
+            timeout=self.timeout,
         )
 
     def _default_headers(

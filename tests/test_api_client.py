@@ -156,3 +156,17 @@ def test_api_client_does_not_refresh_before_local_expiry():
         raise AssertionError("Expected Forbidden to be raised")
 
     assert len(session.calls) == 1
+
+
+def test_api_client_passes_timeout_to_requests_session():
+    session = FakeSession([FakeResponse(200, {"items": []})])
+    client = ApiClient(
+        session=session,
+        delay=0,
+        timeout=12.5,
+    )
+
+    client.get("/me")
+
+    assert session.calls[0][2]["timeout"] == 12.5
+    assert client.oauth_client.timeout == 12.5

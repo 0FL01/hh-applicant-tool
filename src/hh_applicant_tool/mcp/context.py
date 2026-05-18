@@ -50,6 +50,7 @@ def create_runtime(
     profile: HHProfileContext,
     config: MCPServerConfig,
 ) -> MCPRuntime:
+    profile.api_client.timeout = config.request_timeout_seconds
     llm_client = _build_llm_client(profile)
     return MCPRuntime(
         profile=profile,
