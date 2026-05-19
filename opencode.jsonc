@@ -21,10 +21,10 @@
       //
       // Для кастомного профиля/конфига:
       // "command": ["python3", "-m", "hh_applicant_tool.mcp.server", "--profile-id", "second", "--log-level", "INFO"],
-      "environment": {
-        // Приоритет: CLI флаг --profile-id > HH_PROFILE_ID > default
-        "HH_PROFILE_ID": "default"
-      },
+      // Не задаём HH_PROFILE_ID, чтобы сервер использовал базовый профиль
+      // ~/.config/hh-applicant-tool/, совпадающий с обычным CLI без --profile-id.
+      // Если нужен отдельный профиль, передайте его явно:
+      // "command": ["python3", "-m", "hh_applicant_tool.mcp.server", "--profile-id", "second", "--log-level", "INFO"],
       // Таймаут на получение списка tools (ms). По умолчанию 5000, увеличен для HH API
       "timeout": 30000
     }

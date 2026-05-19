@@ -526,6 +526,16 @@ hh-applicant-tool authorize '<ваш телефон или email>' -p '<паро
 [E] name 'async_playwright' is not defined
 ```
 
+Если авторизация сразу падает с ошибкой обращения к `Galaxy A55` — значит
+в вашей версии Playwright нет такого device preset. Утилита подберёт
+ближайший Android-профиль автоматически (например `Pixel 7`), сообщение
+об этом будет в debug-логе.
+
+```sh
+# авторизация заработает без дополнительных флагов
+hh-applicant-tool authorize
+```
+
 Если не помните пароль или др. причины, то можно авторизоваться с помощью одноразового кода:
 
 ```bash
@@ -986,6 +996,27 @@ MVP limitations:
 - no remote vacancy blacklisting;
 - no SMTP notifications.
 
+### OpenCode integration
+
+Добавьте MCP server в `opencode.jsonc` проекта:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "hh-applicant-mcp": {
+      "type": "local",
+      "command": ["python3", "-m", "hh_applicant_tool.mcp.server", "--log-level", "INFO"],
+      "enabled": true
+    }
+  }
+}
+```
+
+> **Важно:** MCP читает конфиг из `~/.config/hh-applicant-tool/config.json`.
+> Не задавайте `HH_PROFILE_ID=default` — это уведёт сервер в подкаталог `default/`,
+> где токена нет. Если нужен не базовый профиль, используйте флаг `--profile-id second`.
+
 ---
 
 ## Шаблоны сообщений
@@ -1035,6 +1066,9 @@ MVP limitations:
 | **Windows** | `C:\Users\%username%\AppData\Roaming\hh-applicant-tool\` |
 | **macOS**   | `~/Library/Application Support/hh-applicant-tool/`       |
 | **Linux**   | `~/.config/hh-applicant-tool/`                           |
+
+В Docker и при явном флаге `-c ./config` используется кастомный путь.
+Проверить активный: `hh-applicant-tool config -p`.
 
 ### Конфигурационный файл
 
