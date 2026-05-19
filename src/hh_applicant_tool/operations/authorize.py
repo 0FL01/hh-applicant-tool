@@ -4,12 +4,15 @@ import argparse
 import asyncio
 import logging
 import typing
+from collections.abc import Mapping
+from contextlib import suppress
 from datetime import datetime
 from http.cookiejar import Cookie
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
 try:
+    from playwright.async_api import Error as PlaywrightError
     from playwright.async_api import async_playwright
 except ImportError:
     pass
@@ -22,6 +25,16 @@ if TYPE_CHECKING:
 
 
 HH_ANDROID_SCHEME = "hhandroid"
+DEFAULT_ANDROID_DEVICE = "Galaxy A55"
+FALLBACK_ANDROID_DEVICES: tuple[str, ...] = (
+    DEFAULT_ANDROID_DEVICE,
+    "Pixel 7",
+    "Pixel 5",
+    "Pixel 4a (5G)",
+    "Galaxy S9+",
+    "Galaxy S8",
+    "Nexus 5X",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +141,15 @@ class Operation(BaseOperation):
             )
 
             try:
-                android_device = pw.devices["Galaxy A55"]
+                device_name, android_device = self._resolve_android_device(
+                    pw.devices
+                )
+                if device_name != DEFAULT_ANDROID_DEVICE:
+                    logger.debug(
+                        "Playwright device '%s' not found, using '%s'",
+                        DEFAULT_ANDROID_DEVICE,
+                        device_name,
+                    )
                 context = await browser.new_context(**android_device)
                 page = await context.new_page()
 
@@ -197,7 +218,8 @@ class Operation(BaseOperation):
 
             finally:
                 logger.debug("Закрытие браузера")
-                await browser.close()
+                with suppress(Exception):
+                    await browser.close()
 
     async def _direct_login(self, page, password: str) -> None:
         logger.info("Вход по паролю...")
@@ -236,6 +258,11 @@ class Operation(BaseOperation):
                 timeout=self.selector_timeout,
                 state="visible",
             )
+        except PlaywrightError as ex:
+            if "has been closed" in str(ex):
+                logger.debug("Браузер был закрыт до завершения ожидания капчи")
+                return
+            raise
         except Exception:
             logger.debug("Капчи нет, продолжаем.")
             return
@@ -259,6 +286,24 @@ class Operation(BaseOperation):
         await page.fill(self.SEL_CAPTCHA_INPUT, captcha_text)
         await page.press(self.SEL_CAPTCHA_INPUT, "Enter")
         logger.debug("Капча отправлена")
+
+    @staticmethod
+    def _resolve_android_device(
+        devices: Mapping[str, Mapping[str, typing.Any]],
+    ) -> tuple[str, dict[str, typing.Any]]:
+        for device_name in FALLBACK_ANDROID_DEVICES:
+            device = devices.get(device_name)
+            if device is not None:
+                return device_name, dict(device)
+
+        for device_name, device in devices.items():
+            user_agent = str(device.get("user_agent") or "")
+            if "Android" in user_agent and "Mobile" in user_agent:
+                return device_name, dict(device)
+
+        raise RuntimeError(
+            "Playwright does not provide any Android mobile device presets."
+        )
 
     def _set_session_cookies(self, cookies: list[dict[str, typing.Any]]):
         for c in cookies:

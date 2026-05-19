@@ -1,0 +1,32 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // HH Applicant Tool MCP server — safe HeadHunter automation tools
+  "mcp": {
+    "hh-applicant-mcp": {
+      "type": "local",
+      "command": [
+        "python3",
+        "-m",
+        "hh_applicant_tool.mcp.server",
+        "--log-level",
+        "INFO"
+      ],
+      "enabled": true,
+      // Tools: hh_whoami, hh_list_resumes, hh_search_vacancies,
+      //        hh_get_vacancy, hh_analyze_vacancy, hh_research_vacancies,
+      //        hh_apply_vacancy (dry-run default), hh_research_and_apply
+      //
+      // Для включения реальных откликов добавьте --allow-apply в command:
+      // "command": ["python3", "-m", "hh_applicant_tool.mcp.server", "--allow-apply", "--log-level", "INFO"]
+      //
+      // Для кастомного профиля/конфига:
+      // "command": ["python3", "-m", "hh_applicant_tool.mcp.server", "--profile-id", "second", "--log-level", "INFO"],
+      "environment": {
+        // Приоритет: CLI флаг --profile-id > HH_PROFILE_ID > default
+        "HH_PROFILE_ID": "default"
+      },
+      // Таймаут на получение списка tools (ms). По умолчанию 5000, увеличен для HH API
+      "timeout": 30000
+    }
+  }
+}
