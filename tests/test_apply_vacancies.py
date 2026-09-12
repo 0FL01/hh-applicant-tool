@@ -4,6 +4,8 @@ import types
 from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
+
 openai_module = types.ModuleType("openai")
 openai_module.OpenAI = object
 sys.modules.setdefault("openai", openai_module)
@@ -233,6 +235,92 @@ def test_letter_file_short_alias_l_is_supported():
     args = parser.parse_args(["-l", "/app/letter.txt"])
 
     assert args.letter_file == Path("/app/letter.txt")
+
+
+def test_get_vacancy_tests_parses_lux_initial_state():
+    vacancy = make_vacancy("101")
+    operation, tool, api_client = make_operation(
+        [vacancy],
+        {"101": "<p>Build APIs for our platform</p>"},
+    )
+    lux_config = {
+        "redirectConfig": {
+            "nested": {
+                "vacancyTests": {
+                    "101": {"uidPk": "u1", "guid": "g1", "tasks": []}
+                }
+            }
+        }
+    }
+    tool.get_redirect_config = lambda url: lux_config
+
+    tests_data = operation._get_vacancy_tests("https://hh.ru/apply")
+
+    assert tests_data == {"101": {"uidPk": "u1", "guid": "g1", "tasks": []}}
+
+
+def test_get_vacancy_tests_raises_when_tests_missing():
+    vacancy = make_vacancy("101")
+    operation, tool, api_client = make_operation(
+        [vacancy],
+        {"101": "<p>Build APIs for our platform</p>"},
+    )
+    tool.get_redirect_config = lambda url: {"redirectConfig": {}}
+
+    with pytest.raises(ValueError, match="tests not found."):
+        operation._get_vacancy_tests("https://hh.ru/apply")
+
+
+def test_unparsed_test_falls_back_to_regular_apply(caplog):
+    """Тест вакансии не спарсился - откликаемся как на обычную вакансию."""
+    vacancy = make_vacancy("101")
+    vacancy["has_test"] = True
+    operation, tool, api_client = make_operation(
+        [vacancy],
+        {"101": "<p>Build APIs for our platform</p>"},
+    )
+    tool.get_redirect_config = lambda url: {"redirectConfig": {}}
+
+    caplog.set_level("WARNING", logger="hh_applicant_tool.operations")
+
+    operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert len(api_client.post_calls) == 1
+    assert api_client.post_calls[0]["params"]["vacancy_id"] == "101"
+    assert any(
+        "пробую откликнуться как на обычную вакансию" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_max_responses_limits_applied_count():
+    vacancies = [make_vacancy(str(100 + i)) for i in range(3)]
+    operation, tool, api_client = make_operation(
+        vacancies,
+        {str(100 + i): f"<p>Description {i}</p>" for i in range(3)},
+    )
+    operation.max_responses = 2
+
+    operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert len(api_client.post_calls) == 2
+
+
+def test_cancel_event_stops_apply_loop():
+    import threading
+
+    vacancies = [make_vacancy(str(100 + i)) for i in range(3)]
+    operation, tool, api_client = make_operation(
+        vacancies,
+        {str(100 + i): f"<p>Description {i}</p>" for i in range(3)},
+    )
+    cancel_event = threading.Event()
+    cancel_event.set()
+    operation._cancel_event = cancel_event
+
+    operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert api_client.post_calls == []
 
 
 def test_env_excluded_keywords_do_not_skip_non_matching_vacancy_name():

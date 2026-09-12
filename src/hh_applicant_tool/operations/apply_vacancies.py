@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
-import json
 import logging
 import random
 import re
@@ -30,6 +29,7 @@ from ..api.errors import ApiError, LimitExceeded
 from ..main import BaseNamespace, BaseOperation
 from ..storage.repositories.errors import RepositoryError
 from ..utils.datatypes import VacancyTestsData
+from ..utils.find import find_key
 from ..utils.json import JSONDecoder
 from ..utils.string import (
     bool2str,
@@ -597,6 +597,7 @@ class Operation(BaseOperation):
         }
 
         do_apply = True
+        applied_count = 0
         storage = self.tool.storage
         site_emails = {}
         vacancies = list(self._get_vacancies(resume_id=resume["id"]))
@@ -612,6 +613,25 @@ class Operation(BaseOperation):
             )
 
         for vacancy in vacancies:
+            if (
+                getattr(self, "_cancel_event", None)
+                and self._cancel_event.is_set()
+            ):
+                logger.info("Операция отменена пользователем")
+                break
+
+            if self.max_responses and applied_count >= self.max_responses:
+                logger.info(
+                    "Достигнут лимит откликов --max-responses (%d). "
+                    "Останавливаюсь.",
+                    self.max_responses,
+                )
+                print(
+                    f"🛑 Достигнут лимит откликов: {self.max_responses}. "
+                    "Останавливаюсь."
+                )
+                break
+
             try:
                 employer = vacancy.get("employer", {})
                 employer_id = employer.get("id")
@@ -704,7 +724,6 @@ class Operation(BaseOperation):
                 if (
                     self.excluded_filter
                     or self.excluded_keywords_filter
-                    or (self.max_responses and self.max_responses > 0)
                 ) and self._is_filtered(vacancy):
                     logger.info(
                         "Вакансия попала под фильтр: %s",
@@ -850,16 +869,10 @@ class Operation(BaseOperation):
 
                 should_remember_dedupe = False
 
-                # HOTFIX(2026-04-07): Пропускаем вакансии с тестами если включен флаг.
-                # Проблема: _solve_vacancy_test -> _get_vacancy_tests парсит HTML от HH.ru,
-                # ищу JSON-маркеры 'vacancyTests' и 'counters', но HH.ru изменил структуру.
-                # Возможные причины:
-                #   - Переименование полей (vacancyTests -> testData, tests, и т.д.)
-                #   - Переход на динамическую загрузку через AJAX
-                #   - Изменение endpoint'а страницы отклика
-                # Полное решение: реверс-инжиниринг новой структуры + переход на API (если есть)
-                # Временное решение: пропускать такие вакансии, чтобы не падать с ошибкой.
-                # Upstream: https://github.com/s3rgeym/hh-applicant-tool/commit/2d117c69930d065af3fb378ad7320060551c42ff
+                # HOTFIX(2026-04-07) снят: парсинг тестов переписан на
+                # HH-Lux-InitialState (см. _get_vacancy_tests). Если тест
+                # все же не найден - падаем на обычный отклик через API,
+                # а не пропускаем вакансию (upstream e742566).
                 if vacancy.get("has_test") and self.skip_tests:
                     logger.debug(
                         "Пропускаю вакансию с тестом (флаг --skip-tests): %s",
@@ -870,6 +883,8 @@ class Operation(BaseOperation):
                         vacancy["alternate_url"],
                     )
                     continue
+
+                test_handled = False
 
                 if vacancy.get("has_test"):
                     logger.debug(
@@ -902,11 +917,26 @@ class Operation(BaseOperation):
                                     )
                         else:
                             should_remember_dedupe = True
+                        test_handled = True
+                    except ValueError as ex:
+                        if str(ex) == "tests not found.":
+                            # hh.ru не отдал данные теста (или тест отменен):
+                            # пробуем откликнуться как на обычную вакансию.
+                            logger.warning(
+                                "Не удалось получить тест (%s), пробую откликнуться как на обычную вакансию: %s",
+                                ex,
+                                vacancy["alternate_url"],
+                            )
+                        else:
+                            logger.error(
+                                f"Произошла непредвиденная ошибка: {ex}"
+                            )
+                            continue
                     except Exception as ex:
                         logger.error(f"Произошла непредвиденная ошибка: {ex}")
                         continue
 
-                else:
+                if not test_handled:
                     params = {
                         "resume_id": resume["id"],
                         "vacancy_id": vacancy_id,
@@ -941,6 +971,8 @@ class Operation(BaseOperation):
                         known_dedupe_vacancy_ids=known_dedupe_vacancy_ids,
                         persist=not self.dry_run,
                     )
+                    # Считаем только реальные попытки отклика (включая тесты).
+                    applied_count += 1
 
                 # Отправка письма на email
                 if self.args.send_email:
@@ -1231,23 +1263,19 @@ class Operation(BaseOperation):
     json_decoder = JSONDecoder()
 
     def _get_vacancy_tests(self, response_url: str) -> VacancyTestsData:
-        """Парсит тесты"""
-        r = self.tool.session.get(response_url)
+        """Парсит тесты из HH-Lux-InitialState на странице отклика.
 
-        tests_marker = ',"vacancyTests":'
-        start_tests = r.text.find(tests_marker)
-        end_tests = r.text.find(',"counters":', start_tests)
-
-        if -1 in (start_tests, end_tests):
+        Старый линейный поиск JSON-маркеров ',"vacancyTests":' ... ',"counters":'
+        перестал работать после смены структуры страницы hh.ru. Теперь
+        конфигурация достается целиком из template#HH-Lux-InitialState,
+        разэкранируется и разбирается как JSON, а vacancyTests ищется
+        рекурсивно через find_key (upstream 67015f9/d0bc5e6).
+        """
+        res = self.tool.get_redirect_config(response_url)
+        tests_data = find_key(res, "vacancyTests")
+        if not tests_data:
             raise ValueError("tests not found.")
-
-        try:
-            return utils.json.loads(
-                r.text[start_tests + len(tests_marker) : end_tests],
-                strict=False,
-            )
-        except json.JSONDecodeError as ex:
-            raise ValueError("Не могу распарсить vacancyTests.") from ex
+        return tests_data
 
     def _solve_vacancy_test(
         self,
@@ -1526,11 +1554,9 @@ class Operation(BaseOperation):
         return not format_ids.intersection(self.work_format)
 
     def _is_filtered(self, vacancy: SearchVacancy) -> bool:
-        if (
-            not self.excluded_filter
-            and not self.excluded_keywords_filter
-            and not self.max_responses
-        ):
+        # --max-responses больше не участвует в фильтрации: лимит
+        # примененных откликов enforced в цикле рассылки (upstream 9f0e0d0).
+        if not self.excluded_filter and not self.excluded_keywords_filter:
             return False
 
         if self.excluded_keywords_filter:
@@ -1548,28 +1574,12 @@ class Operation(BaseOperation):
             if keywords_pat.search(search_text):
                 return True
 
-        if not self.excluded_filter and not self.max_responses:
+        if not self.excluded_filter:
             return False
 
         r = self.tool.session.get("https://hh.ru/vacancy/" + vacancy["id"])
         r.raise_for_status()
         # print(r.text)
-
-        # TODO: количество откликов можно узнать только на странице поиска в
-        # веб-версии
-        if self.max_responses:
-            # responses_count, _ = self.json_decoder.raw_decode(
-            #     re.search(r'"totalResponsesCount":(\d+)', r.text).group(1)
-            # )
-            # responses_count = int(responses_count)
-            # logger.debug(
-            #     "%s (%s): %d отклик (-а, -ов)",
-            #     vacancy["alternate_url"],
-            #     vacancy["name"],
-            #     responses_count,
-            # )
-            # return responses_count >= self.max_responses
-            return False
 
         if self.excluded_filter:
             description = ""

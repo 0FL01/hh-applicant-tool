@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import re
 import typing
 from collections.abc import Mapping
 from contextlib import suppress
@@ -15,7 +16,7 @@ try:
     from playwright.async_api import Error as PlaywrightError
     from playwright.async_api import async_playwright
 except ImportError:
-    pass
+    async_playwright = None
 
 from ..main import BaseOperation
 from ..utils.terminal import print_kitty_image, print_sixel_mage
@@ -44,10 +45,22 @@ class Operation(BaseOperation):
 
     __aliases__: list = ["authenticate", "auth", "login"]
 
-    # Селекторы
+    # Селекторы. Старые data-qa оставлены как fallback: hh.ru в 2026
+    # перешёл на magritte-форму (телефон/почта раздельно).
+    SEL_LOGIN_FORM = '[data-qa="account-login-form"]'
     SEL_LOGIN_INPUT = 'input[data-qa="login-input-username"]'
-    SEL_EXPAND_PASSWORD = 'button[data-qa="expand-login-by_password"]'
-    SEL_PASSWORD_INPUT = 'input[data-qa="login-input-password"]'
+    SEL_PHONE_INPUT = (
+        'input[data-qa="magritte-phone-input-national-number-input"]'
+    )
+    SEL_EMAIL_TAB = '[data-qa="credential-type-email"]'
+    SEL_EMAIL_INPUT = 'input[data-qa="applicant-login-input-email"]'
+    SEL_EXPAND_PASSWORD = (
+        '[data-qa="expand-login-by-password"], '
+        'button[data-qa="account-login-submit-by-password"]'
+    )
+    SEL_PASSWORD_INPUT = (
+        'input[data-qa="login-input-password"], input[type="password"]'
+    )
     SEL_CODE_CONTAINER = 'div[data-qa="account-login-code-input"]'
     SEL_PIN_CODE_INPUT = 'input[data-qa="magritte-pincode-input-field"]'
     SEL_CAPTCHA_IMAGE = 'img[data-qa="account-captcha-picture"]'
@@ -106,6 +119,14 @@ class Operation(BaseOperation):
         return 0
 
     async def _run(self) -> None:
+        if async_playwright is None:
+            raise RuntimeError(
+                "Не удалось импортировать Playwright. Установите extra "
+                "`playwright` и Chromium (`pip install "
+                "'hh-applicant-tool[playwright]'` и "
+                "`hh-applicant-tool install`)."
+            )
+
         args = self._tool.args
         api_client = self._tool.api_client
         storage = self._tool.storage
@@ -171,15 +192,12 @@ class Operation(BaseOperation):
                 )
                 await page.goto(
                     api_client.oauth_client.authorize_url,
-                    timeout=30000,
+                    timeout=60000,
                     wait_until="load",
                 )
 
                 if self.is_automated:
-                    await page.wait_for_selector(
-                        self.SEL_LOGIN_INPUT, timeout=self.selector_timeout
-                    )
-                    await page.fill(self.SEL_LOGIN_INPUT, username)
+                    await self._fill_username(page, username)
                     logger.debug("Логин введен")
 
                     password = args.password or storage.settings.get_value(
@@ -221,20 +239,62 @@ class Operation(BaseOperation):
                 with suppress(Exception):
                     await browser.close()
 
+    @staticmethod
+    def _national_phone(username: str) -> str:
+        digits = re.sub(r"\D", "", username)
+        if len(digits) == 11 and digits[0] in "78":
+            return digits[1:]
+        return digits
+
+    async def _fill_username(self, page, username: str) -> None:
+        """Заполняет логин в старой или новой (magritte) форме hh.ru."""
+        await page.wait_for_selector(
+            ", ".join(
+                (
+                    self.SEL_LOGIN_FORM,
+                    self.SEL_LOGIN_INPUT,
+                    self.SEL_PHONE_INPUT,
+                    self.SEL_EMAIL_INPUT,
+                )
+            ),
+            timeout=self.selector_timeout,
+        )
+
+        if "@" in username:
+            email_tab = page.locator(self.SEL_EMAIL_TAB)
+            if await email_tab.count():
+                await email_tab.first.click(force=True)
+            email_input = page.locator(self.SEL_EMAIL_INPUT)
+            if await email_input.count():
+                await email_input.first.fill(username)
+                return
+
+        phone_input = page.locator(self.SEL_PHONE_INPUT)
+        if await phone_input.count() and "@" not in username:
+            await phone_input.first.fill(self._national_phone(username))
+            return
+
+        await page.fill(self.SEL_LOGIN_INPUT, username)
+
     async def _direct_login(self, page, password: str) -> None:
         logger.info("Вход по паролю...")
-        await page.click(self.SEL_EXPAND_PASSWORD)
+        await page.locator(self.SEL_EXPAND_PASSWORD).first.click(force=True)
         await self._handle_captcha(page)
         await page.wait_for_selector(
             self.SEL_PASSWORD_INPUT, timeout=self.selector_timeout
         )
-        await page.fill(self.SEL_PASSWORD_INPUT, password)
-        await page.press(self.SEL_PASSWORD_INPUT, "Enter")
+        password_input = page.locator(self.SEL_PASSWORD_INPUT).first
+        await password_input.fill(password)
+        await password_input.press("Enter")
         logger.debug("Форма с паролем отправлена")
 
     async def _onetime_code_login(self, page) -> None:
         logger.info("Вход по одноразовому коду...")
-        await page.press(self.SEL_LOGIN_INPUT, "Enter")
+        login_field = page.locator(
+            f"{self.SEL_EMAIL_INPUT}, {self.SEL_PHONE_INPUT}, "
+            f"{self.SEL_LOGIN_INPUT}"
+        ).first
+        await login_field.press("Enter")
         await self._handle_captcha(page)
         await page.wait_for_selector(
             self.SEL_CODE_CONTAINER, timeout=self.selector_timeout

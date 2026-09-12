@@ -158,7 +158,14 @@ class Operation(BaseOperation):
                 # except RepositoryError as e:
                 #     logger.exception(e)
 
-                if not (resume := resume_map.get(negotiation["resume"]["id"])):
+                # hh.ru иногда отдает negotiation с resume=null или без
+                # ключа resume (upstream 737dc94/35bccac) - не падаем.
+                if not negotiation.get("resume"):
+                    continue
+
+                if not (
+                    resume := resume_map.get(negotiation["resume"].get("id"))
+                ):
                     continue
 
                 updated_at = parse_api_datetime(negotiation["updated_at"])
@@ -166,7 +173,7 @@ class Operation(BaseOperation):
                 # Пропуск откликов, которые не обновлялись более N дней (при просмотре они обновляются вроде)
                 if (
                     self.period
-                    and (datetime().now(updated_at.tzinfo) - updated_at).days
+                    and (datetime.now(updated_at.tzinfo) - updated_at).days
                     > self.period
                 ):
                     continue
@@ -234,7 +241,9 @@ class Operation(BaseOperation):
 
                     if page + 1 >= messages_res["pages"]:
                         break
-                    page = messages_res["pages"] - 1
+                    # Итерируем страницы последовательно (upstream ef0a7a7):
+                    # прыжок на последнюю страницу пропускал середину истории.
+                    page += 1
 
                 if not last_message:
                     continue

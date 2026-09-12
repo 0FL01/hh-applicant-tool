@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import html
 import logging
 import os
+import re
+import signal
 import smtplib
 import sqlite3
 import sys
+import threading
 from collections.abc import Sequence
 from functools import cached_property
 from http.cookiejar import MozillaCookieJar
@@ -23,6 +27,7 @@ from . import api, utils
 from .context import HHProfileContext
 from .storage import StorageFacade
 from .utils.cookiejar import HHOnlyCookieJar
+from .utils.find import find_key
 from .utils.log import setup_logger
 
 DEFAULT_CONFIG_DIR = utils.get_config_path() / (__package__ or "").replace(
@@ -32,7 +37,7 @@ DEFAULT_CONFIG_FILENAME = "config.json"
 DEFAULT_LOG_FILENAME = "log.txt"
 DEFAULT_DATABASE_FILENAME = "data"
 DEFAULT_COOKIES_FILENAME = "cookies.txt"
-DEFAULT_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+DEFAULT_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 
 logger = logging.getLogger(__package__)
 agent_logger = logging.getLogger("hh_llm_agent")
@@ -418,16 +423,30 @@ class HHApplicantTool:
         return OpenRouterChatClient(config)
 
     # TODO: вынести в миксин какой
+    def _cookie_value(self, name: str) -> str | None:
+        for cookie in self.session.cookies:
+            if cookie.name == name:
+                return cookie.value
+        return None
+
     def _extract_xsrf_token(self, content: str) -> str:
-        xsrf_token_marker = ',"xsrfToken":"'
-        s1 = content.find(xsrf_token_marker)
-        if s1 == -1:
+        # hh.ru отдает этот блок с HTML-заэкранированными кавычками
+        # (внутри HTML-атрибута), поэтому сначала разэкранируем всю страницу
+        content = html.unescape(content)
+        tokens = re.findall(r',"xsrfToken":"([^"]+)"', content)
+        if not tokens:
             raise ValueError("xsrf token not found")
-        s1 += len(xsrf_token_marker)
-        s2 = content.find('"', s1)
-        if s2 == -1:
-            raise ValueError("malformed xsrf token")
-        return content[s1:s2]
+
+        # На странице hh.ru может быть несколько xsrfToken. Первый из них —
+        # случайное значение, которое ротируется при каждой загрузке и НЕ
+        # соответствует cookie `_xsrf`, из-за чего POST на
+        # /applicant/vacancy_response/popup возвращал 403 (CSRF mismatch).
+        # Сервер сверяет токен именно с cookie `_xsrf`, поэтому отдаем
+        # совпадающее значение, а не первое вхождение.
+        cookie_xsrf = self._cookie_value("_xsrf")
+        if cookie_xsrf and cookie_xsrf in tokens:
+            return cookie_xsrf
+        return tokens[0]
 
     def _get_xsrf_token(self, url: str | None = None) -> str:
         """Возвращает XSRF-токен, который выдается на сессию"""
@@ -437,6 +456,52 @@ class HHApplicantTool:
     @cached_property
     def xsrf_token(self) -> str:
         return self._get_xsrf_token()
+
+    @staticmethod
+    def _is_authenticated(config: dict[str, Any]) -> bool:
+        account = config.get("account") or {}
+        if not account:
+            return False
+        # Если пользователь неавторизован, содержит поля типа firstName,
+        # lastName и т.д. со значением None (все поля)
+        return any(v is not None for v in account.values())
+
+    def parse_redirect_config(
+        self,
+        response: requests.Response,
+        check_auth: bool = True,
+    ) -> dict[str, Any]:
+        """Разбирает HH-Lux-InitialState со страницы отклика hh.ru."""
+        if response.status_code != 200:
+            raise api.BadResponse(
+                f"Неожиданный код ответа: {response.status_code} {response.url}"
+            )
+
+        try:
+            raw_config = response.text.split('id="HH-Lux-InitialState">')[1]
+            raw_config = raw_config.split("</template>")[0]
+        except IndexError as ex:
+            raise api.BadResponse(
+                f"Template with config not found on {response.url}"
+            ) from ex
+
+        # hh.ru экранирует кавычки сущностями внутри атрибута
+        if raw_config.startswith('{&#34;'):
+            raw_config = html.unescape(raw_config)
+
+        config = utils.json.loads(raw_config)
+        assert type(config) is dict
+        assert "redirectConfig" in config
+        if check_auth and not self._is_authenticated(config):
+            raise api.BadResponse("Авторизация истекла, требуется новая!")
+        return config
+
+    def get_redirect_config(
+        self, url: str, check_auth: bool = True
+    ) -> dict[str, Any]:
+        return self.parse_redirect_config(
+            self.session.get(url), check_auth
+        )
 
     @property
     def is_logged_in(self) -> bool:
@@ -482,10 +547,36 @@ class HHApplicantTool:
         utils.setup_terminal()
 
         if self.args.run:
+            # Мягкое прерывание по Ctrl+C (SIGINT). Первый ^C просит
+            # операцию остановиться после текущего шага (через
+            # _cancel_event), второй - немедленно прерывает (upstream
+            # 9f0e0d0). Это спасает массовую рассылку откликов от
+            # мгновенного обрыва посреди итерации.
+            cancel_event = threading.Event()
+            operation = getattr(self.args.run, "__self__", None)
+            if operation is not None:
+                operation._cancel_event = cancel_event
+
+            def _handle_sigint(signum, frame):  # noqa: ARG001
+                if cancel_event.is_set():
+                    logger.warning(
+                        "Повторное прерывание - принудительный выход"
+                    )
+                    raise KeyboardInterrupt
+                logger.warning(
+                    "Получен SIGINT: останавливаюсь после текущего шага "
+                    "(еще один Ctrl+C для немедленного выхода)"
+                )
+                cancel_event.set()
+
+            previous_handler = signal.signal(signal.SIGINT, _handle_sigint)
             try:
-                return self.args.run(self)
-            except KeyboardInterrupt:
-                logger.warning("Выполнение прервано пользователем!")
+                try:
+                    return self.args.run(self)
+                except KeyboardInterrupt:
+                    logger.warning("Выполнение прервано пользователем!")
+                finally:
+                    signal.signal(signal.SIGINT, previous_handler)
             except api.errors.CaptchaRequired as ex:
                 logger.error(f"Требуется ввод капчи: {ex.captcha_url}")
             except api.errors.InternalServerError:
