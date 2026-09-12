@@ -326,6 +326,30 @@ def test_dry_run_does_not_persist_decisions_and_can_repeat(monkeypatch):
     assert reply_call["schema"].name == REPLY_RESPONSE_SCHEMA.name
 
 
+def test_reply_prompt_routes_screening_by_question_shape(monkeypatch):
+    FakeLLMClient.reset()
+    service = make_service(
+        monkeypatch,
+        make_tool(),
+        FakeGateway(),
+        dry_run=True,
+    )
+
+    messages = service._build_llm_messages(
+        NEGOTIATION,
+        RESUME,
+        ME,
+        [EMPLOYER_MESSAGE],
+        [EMPLOYER_MESSAGE],
+    )
+
+    instruction = messages[-1]["content"]
+    assert "одного короткого screening-вопроса" in instruction
+    assert "нескольких самостоятельных screening-вопросов" in instruction
+    assert "сложного открытого вопроса" in instruction
+    assert "особенно с маркерами 'несколько вопросов'" not in instruction
+
+
 def test_existing_dry_run_decision_does_not_block_processing(monkeypatch):
     FakeLLMClient.reset()
     tool = make_tool()
