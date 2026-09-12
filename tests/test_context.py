@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from hh_applicant_tool import HHApplicantTool, HHProfileContext
 
@@ -90,3 +91,32 @@ def test_hh_applicant_tool_from_profile_returns_non_cli_context(
     assert context.config_path == (tmp_path / "profile-a").resolve()
     assert context.api_client.delay == 0.1
     assert context.api_client.user_agent == "provided-user-agent"
+
+
+def test_get_openai_chat_uses_generic_openai_env(monkeypatch):
+    captured = {}
+
+    class FakeChatClient:
+        def __init__(self, config):
+            captured["config"] = config
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "token")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "auto/model")
+    monkeypatch.setenv("OPENAI_REASONING", "max")
+    monkeypatch.setattr(
+        "hh_llm_agent.openrouter.OpenRouterChatClient",
+        FakeChatClient,
+    )
+    tool = SimpleNamespace(config={})
+
+    HHApplicantTool.get_openai_chat(tool, "system")
+
+    config = captured["config"]
+    assert config.api_key == "token"
+    assert config.base_url == "https://proxy.example/v1"
+    assert config.model == "auto/model"
+    assert config.reasoning_effort == "max"

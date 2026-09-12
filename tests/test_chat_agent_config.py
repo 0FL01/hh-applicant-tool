@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from hh_llm_agent.config import (
     DEFAULT_CLASSIFIER_MODEL,
     load_agent_config,
@@ -69,6 +71,41 @@ def test_load_agent_config_uses_default_classifier_model(monkeypatch):
     assert config.classifier is not None
     assert config.classifier.enabled is True
     assert config.classifier.openrouter.model == DEFAULT_CLASSIFIER_MODEL
+
+
+@pytest.mark.parametrize(
+    "effort",
+    ["none", "low", "medium", "high", "xhigh", "max"],
+)
+def test_load_agent_config_uses_generic_openai_env(monkeypatch, effort):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    monkeypatch.delenv("CHAT_AGENT_CLASSIFIER_MODEL", raising=False)
+    monkeypatch.delenv("CHAT_AGENT_CLASSIFIER_REASONING", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "token")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "auto/model")
+    monkeypatch.setenv("OPENAI_REASONING", effort)
+
+    config = load_agent_config(make_tool(), make_args())
+
+    assert config.openrouter.api_key == "token"
+    assert config.openrouter.base_url == "https://proxy.example/v1"
+    assert config.openrouter.model == "auto/model"
+    assert config.openrouter.reasoning_effort == effort
+    assert config.classifier is not None
+    assert config.classifier.openrouter.model == "auto/model"
+    assert config.classifier.openrouter.reasoning_effort == effort
+
+
+@pytest.mark.parametrize("value", ["true", "false", "extreme"])
+def test_load_agent_config_rejects_invalid_openai_reasoning(monkeypatch, value):
+    monkeypatch.setenv("OPENAI_API_KEY", "token")
+    monkeypatch.setenv("OPENAI_REASONING", value)
+
+    with pytest.raises(ValueError, match="OPENAI_REASONING must be one of"):
+        load_agent_config(make_tool(), make_args())
 
 
 def test_load_agent_config_allows_classifier_env_override(monkeypatch):

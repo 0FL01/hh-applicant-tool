@@ -370,12 +370,17 @@ class HHApplicantTool:
         Returns OpenRouterChatClient for unified AI interface.
         The system_prompt argument is passed through to send_message() call sites.
         """
-        from hh_llm_agent.config import OpenRouterConfig
+        from hh_llm_agent.config import (
+            OpenRouterConfig,
+            load_openai_env,
+            parse_reasoning_effort,
+        )
         from hh_llm_agent.openrouter import OpenRouterChatClient
 
         c = self.config.get("openai", {})
+        openai_env = load_openai_env()
         # Fallback chain: openai.token → universal api_key → env
-        token = c.get("token") or self.config.get("api_key") or getenv("OPENAI_API_KEY")
+        token = c.get("token") or self.config.get("api_key") or openai_env.api_key
         if not token:
             raise ValueError(
                 "Токен для OpenAI не задан. Укажите api_key в config.json "
@@ -385,16 +390,25 @@ class HHApplicantTool:
         base_url = (
             c.get("completion_endpoint")
             or self.config.get("openai_base_url")
-            or getenv("OPENAI_BASE_URL")
+            or openai_env.base_url
+        )
+        reasoning_effort = (
+            parse_reasoning_effort(
+                c.get("reasoning_effort"),
+                "openai.reasoning_effort",
+            )
+            if c.get("reasoning_effort") is not None
+            else openai_env.reasoning_effort
         )
 
         config = OpenRouterConfig(
             api_key=token,
             base_url=base_url,
-            model=c.get("model"),
+            model=c.get("model") or openai_env.model,
             temperature=c.get("temperature", 0.7),
             max_completion_tokens=c.get("max_completion_tokens", 1000),
-            reasoning_enabled=False,
+            reasoning_enabled=bool(c.get("reasoning_enabled", False)),
+            reasoning_effort=reasoning_effort,
         )
         if hasattr(self, "openai_session") and self.openai_session.proxies:
             prox = self.openai_session.proxies

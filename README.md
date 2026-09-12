@@ -820,6 +820,21 @@ hh-applicant-tool apply-vacancies -f --ai
 
 ### OpenRouter Chat Agent
 
+Все AI-пути можно направить в OpenRouter, OmniRoute или другой
+OpenAI-compatible endpoint через единый набор переменных окружения:
+
+```dotenv
+OPENAI_API_KEY=ВАШ_API_КЛЮЧ
+OPENAI_BASE_URL=https://example.com/v1
+OPENAI_MODEL=auto/best-vision
+# none, low, medium, high, xhigh или max
+OPENAI_REASONING=high
+```
+
+Для OmniRoute укажите его `/v1` endpoint. При запуске утилиты в Docker адрес
+`localhost` относится к контейнеру утилиты, поэтому endpoint должен быть
+доступен из той же Docker-сети или через адрес хоста.
+
 Можно указать универсальные ключи в корне `config.json` — они подойдут и `chat-agent`, и старым командам:
 
 ```json
@@ -839,7 +854,7 @@ hh-applicant-tool apply-vacancies -f --ai
     "base_url": "https://openrouter.ai/api/v1",
     "temperature": 0.2,
     "max_completion_tokens": 1200,
-    "reasoning_enabled": true
+    "reasoning_effort": "high"
   },
   "chat_agent": {
     "max_history_messages": 12,
@@ -920,7 +935,7 @@ MCP server работает в одном profile-context и используе�
     "base_url": "https://openrouter.ai/api/v1",
     "temperature": 0.2,
     "max_completion_tokens": 1200,
-    "reasoning_enabled": true
+    "reasoning_effort": "high"
   },
   "mcp": {
     "allow_apply": false,

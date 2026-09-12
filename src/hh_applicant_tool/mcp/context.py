@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from os import getenv
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +11,8 @@ from hh_llm_agent.config import (
     DEFAULT_OPENROUTER_BASE_URL,
     DEFAULT_OPENROUTER_MODEL,
     OpenRouterConfig,
+    load_openai_env,
+    parse_reasoning_effort,
 )
 from hh_llm_agent.openrouter import OpenRouterChatClient
 
@@ -123,12 +124,12 @@ def _resolve_policy_file(
 def _build_llm_client(profile: HHProfileContext) -> OpenRouterChatClient | None:
     app_config = profile.config
     openrouter_cfg = app_config.get("openrouter", {})
+    openai_env = load_openai_env()
     api_key = (
         openrouter_cfg.get("api_key")
         or openrouter_cfg.get("token")
         or app_config.get("api_key")
-        or getenv("OPENROUTER_API_KEY")
-        or getenv("OPENAI_API_KEY")
+        or openai_env.api_key
     )
     if not api_key:
         return None
@@ -138,13 +139,12 @@ def _build_llm_client(profile: HHProfileContext) -> OpenRouterChatClient | None:
         base_url=(
             openrouter_cfg.get("base_url")
             or app_config.get("openai_base_url")
-            or getenv("OPENROUTER_BASE_URL")
-            or getenv("OPENAI_BASE_URL")
+            or openai_env.base_url
             or DEFAULT_OPENROUTER_BASE_URL
         ),
         model=(
             openrouter_cfg.get("model")
-            or getenv("OPENROUTER_MODEL")
+            or openai_env.model
             or DEFAULT_OPENROUTER_MODEL
         ),
         temperature=float(openrouter_cfg.get("temperature", 0.2)),
@@ -161,6 +161,14 @@ def _build_llm_client(profile: HHProfileContext) -> OpenRouterChatClient | None:
             openrouter_cfg.get("rate_limit_retry_base_seconds", 2.0)
         ),
         reasoning_enabled=bool(openrouter_cfg.get("reasoning_enabled", True)),
+        reasoning_effort=(
+            parse_reasoning_effort(
+                openrouter_cfg.get("reasoning_effort"),
+                "openrouter.reasoning_effort",
+            )
+            if openrouter_cfg.get("reasoning_effort") is not None
+            else openai_env.reasoning_effort
+        ),
         app_name=openrouter_cfg.get("app_name") or "hh-applicant-tool",
         referer=(
             openrouter_cfg.get("referer")

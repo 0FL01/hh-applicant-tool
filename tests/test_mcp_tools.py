@@ -10,6 +10,7 @@ from requests import Request, Response
 
 from hh_applicant_tool.api import errors as api_errors
 from hh_applicant_tool.mcp.context import MCPRuntime, MCPServerConfig
+from hh_applicant_tool.mcp.context import _build_llm_client
 from hh_applicant_tool.mcp.context import create_runtime
 from hh_applicant_tool.mcp.context import load_server_config
 from hh_applicant_tool.mcp.server import build_server
@@ -184,7 +185,9 @@ def test_load_server_config_uses_profile_config_and_policy_file(tmp_path):
     }
 
 
-def test_create_runtime_applies_mcp_request_timeout_to_api_client():
+def test_create_runtime_applies_mcp_request_timeout_to_api_client(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     profile = FakeProfile()
     profile.config = {}
     profile.api_client = SimpleNamespace(timeout=None)
@@ -195,6 +198,37 @@ def test_create_runtime_applies_mcp_request_timeout_to_api_client():
     )
 
     assert profile.api_client.timeout == 7.5
+
+
+def test_mcp_llm_client_uses_generic_openai_env(monkeypatch):
+    captured = {}
+
+    class FakeChatClient:
+        def __init__(self, config):
+            captured["config"] = config
+
+    profile = FakeProfile()
+    profile.config = {}
+    profile._get_openai_proxies = lambda: None
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "token")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "auto/model")
+    monkeypatch.setenv("OPENAI_REASONING", "high")
+    monkeypatch.setattr(
+        "hh_applicant_tool.mcp.context.OpenRouterChatClient",
+        FakeChatClient,
+    )
+
+    _build_llm_client(profile)
+
+    config = captured["config"]
+    assert config.api_key == "token"
+    assert config.base_url == "https://proxy.example/v1"
+    assert config.model == "auto/model"
+    assert config.reasoning_effort == "high"
 
 
 def test_tool_error_marks_started_mcp_run_failed():

@@ -9,6 +9,7 @@ from .timing import AgentTimingConfig
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = "google/gemini-3.1-flash-lite-preview"
 DEFAULT_CLASSIFIER_MODEL = "google/gemma-3-27b-it"
+REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 DEFAULT_SYSTEM_PROMPT = (
     "Ты соискатель на HeadHunter. Отвечай работодателю по-русски, вежливо, "
     "кратко и по делу. Не выдумывай факты о кандидате. Если в переписке не "
@@ -58,6 +59,7 @@ class OpenRouterConfig:
     max_retries_on_rate_limit: int = 2
     rate_limit_retry_base_seconds: float = 2.0
     reasoning_enabled: bool = True
+    reasoning_effort: str | None = None
     app_name: str = "hh-applicant-tool"
     referer: str = "https://github.com/s3rgeym/hh-applicant-tool"
     proxies: dict[str, str] | None = None
@@ -121,6 +123,36 @@ class TelegramCollectorConfig:
     db_path: str = "tg_collector.sqlite3"
 
 
+@dataclass(frozen=True)
+class OpenAIEnvConfig:
+    api_key: str | None
+    base_url: str | None
+    model: str | None
+    reasoning_effort: str | None
+
+
+def parse_reasoning_effort(value: Any, source: str) -> str | None:
+    if value is None:
+        return None
+    effort = str(value).strip().lower()
+    if effort not in REASONING_EFFORTS:
+        allowed = ", ".join(REASONING_EFFORTS)
+        raise ValueError(f"{source} must be one of: {allowed}.")
+    return effort
+
+
+def load_openai_env() -> OpenAIEnvConfig:
+    return OpenAIEnvConfig(
+        api_key=getenv("OPENROUTER_API_KEY") or getenv("OPENAI_API_KEY"),
+        base_url=getenv("OPENROUTER_BASE_URL") or getenv("OPENAI_BASE_URL"),
+        model=getenv("OPENROUTER_MODEL") or getenv("OPENAI_MODEL"),
+        reasoning_effort=parse_reasoning_effort(
+            getenv("OPENAI_REASONING"),
+            "OPENAI_REASONING",
+        ),
+    )
+
+
 def _parse_env_bool(name: str) -> bool | None:
     value = getenv(name)
     if value is None:
@@ -179,6 +211,7 @@ def _env_bool_or_value(
 
 def load_agent_config(tool: Any, args: Any) -> AgentConfig:
     config = tool.config
+    openai_env = load_openai_env()
 
     openrouter_cfg = config.get("openrouter", {})
     agent_cfg = config.get("chat_agent", {})
@@ -190,12 +223,11 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         or openrouter_cfg.get("api_key")
         or openrouter_cfg.get("token")
         or config.get("api_key")
-        or getenv("OPENROUTER_API_KEY")
-        or getenv("OPENAI_API_KEY")
+        or openai_env.api_key
     )
     if not api_key:
         raise ValueError(
-            "OpenRouter API key is not configured. Use openrouter.api_key, "
+            "AI API key is not configured. Use openrouter.api_key, "
             "top-level api_key in config.json, OPENROUTER_API_KEY "
             "or OPENAI_API_KEY."
         )
@@ -216,22 +248,34 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         int,
     )
 
-    model = _env_or_value(
-        "OPENROUTER_MODEL",
-        getattr(args, "model", None),
-        openrouter_cfg.get("model"),
-        DEFAULT_OPENROUTER_MODEL,
-        str,
+    model = (
+        getattr(args, "model", None)
+        or openrouter_cfg.get("model")
+        or openai_env.model
+        or DEFAULT_OPENROUTER_MODEL
     )
 
     base_url = (
         getattr(args, "openrouter_base_url", None)
         or openrouter_cfg.get("base_url")
         or config.get("openai_base_url")
-        or getenv("OPENROUTER_BASE_URL")
-        or getenv("OPENAI_BASE_URL")
+        or openai_env.base_url
         or DEFAULT_OPENROUTER_BASE_URL
     )
+
+    reasoning_enabled = True
+    reasoning_effort = None
+    if getattr(args, "reasoning", None) is not None:
+        reasoning_enabled = bool(args.reasoning)
+    elif openrouter_cfg.get("reasoning_effort") is not None:
+        reasoning_effort = parse_reasoning_effort(
+            openrouter_cfg["reasoning_effort"],
+            "openrouter.reasoning_effort",
+        )
+    elif "reasoning_enabled" in openrouter_cfg:
+        reasoning_enabled = bool(openrouter_cfg["reasoning_enabled"])
+    elif openai_env.reasoning_effort is not None:
+        reasoning_effort = openai_env.reasoning_effort
 
     period_days = _env_or_value(
         "CHAT_AGENT_PERIOD_DAYS",
@@ -302,9 +346,8 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
             2.0,
             float,
         ),
-        reasoning_enabled=getattr(args, "reasoning", None)
-        if getattr(args, "reasoning", None) is not None
-        else openrouter_cfg.get("reasoning_enabled", True),
+        reasoning_enabled=reasoning_enabled,
+        reasoning_effort=reasoning_effort,
         app_name=openrouter_cfg.get("app_name") or "hh-applicant-tool",
         referer=(
             openrouter_cfg.get("referer")
@@ -336,12 +379,12 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         int,
     )
 
-    classifier_model = _env_or_value(
-        "CHAT_AGENT_CLASSIFIER_MODEL",
-        getattr(args, "classifier_model", None),
-        classifier_cfg.get("model"),
-        DEFAULT_CLASSIFIER_MODEL,
-        str,
+    classifier_model = (
+        getattr(args, "classifier_model", None)
+        or classifier_cfg.get("model")
+        or getenv("CHAT_AGENT_CLASSIFIER_MODEL")
+        or openai_env.model
+        or DEFAULT_CLASSIFIER_MODEL
     )
 
     classifier_max_history_messages = _env_or_value(
@@ -368,12 +411,29 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
         str,
     )
 
-    classifier_reasoning = _env_bool_or_value(
-        "CHAT_AGENT_CLASSIFIER_REASONING",
-        getattr(args, "classifier_reasoning", None),
-        classifier_cfg.get("reasoning_enabled"),
-        False,
-    )
+    classifier_reasoning = False
+    classifier_reasoning_effort = None
+    classifier_reasoning_env = getenv("CHAT_AGENT_CLASSIFIER_REASONING")
+    if getattr(args, "classifier_reasoning", None) is not None:
+        classifier_reasoning = bool(args.classifier_reasoning)
+    elif classifier_cfg.get("reasoning_effort") is not None:
+        classifier_reasoning_effort = parse_reasoning_effort(
+            classifier_cfg["reasoning_effort"],
+            "chat_agent.classifier.reasoning_effort",
+        )
+    elif "reasoning_enabled" in classifier_cfg:
+        classifier_reasoning = bool(classifier_cfg["reasoning_enabled"])
+    elif classifier_reasoning_env is not None:
+        legacy_value = _parse_env_bool("CHAT_AGENT_CLASSIFIER_REASONING")
+        if legacy_value is None:
+            classifier_reasoning_effort = parse_reasoning_effort(
+                classifier_reasoning_env,
+                "CHAT_AGENT_CLASSIFIER_REASONING",
+            )
+        else:
+            classifier_reasoning = legacy_value
+    elif openai_env.reasoning_effort is not None:
+        classifier_reasoning_effort = openai_env.reasoning_effort
 
     classifier = ClassifierConfig(
         enabled=bool(classifier_enabled),
@@ -387,6 +447,7 @@ def load_agent_config(tool: Any, args: Any) -> AgentConfig:
             max_retries_on_rate_limit=openrouter.max_retries_on_rate_limit,
             rate_limit_retry_base_seconds=openrouter.rate_limit_retry_base_seconds,
             reasoning_enabled=bool(classifier_reasoning),
+            reasoning_effort=classifier_reasoning_effort,
             app_name=openrouter.app_name,
             referer=openrouter.referer,
             proxies=proxies,

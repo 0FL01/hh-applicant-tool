@@ -18,8 +18,12 @@ from urllib.parse import urlparse
 import requests
 
 from .. import utils
+from hh_llm_agent.config import (
+    OpenRouterConfig,
+    load_openai_env,
+    parse_reasoning_effort,
+)
 from hh_llm_agent.openrouter import OpenRouterChatClient, OpenRouterError
-from hh_llm_agent.config import OpenRouterConfig
 from ..api import BadResponse, Redirect, datatypes
 from ..api.datatypes import PaginatedItems, SearchVacancy
 from ..api.errors import ApiError, LimitExceeded
@@ -481,17 +485,20 @@ class Operation(BaseOperation):
         # AI Vacancy Filter instance
         vf_config = tool.config.get("openai_vacancy_filter", {})
         openai_cfg = tool.config.get("openai", {})
+        openai_env = load_openai_env()
         # api_key: openai_vacancy_filter.api_key → openai.token → universal api_key
         vf_token = (
             vf_config.get("api_key")
             or openai_cfg.get("token")
             or tool.config.get("api_key")
+            or openai_env.api_key
         )
         # base_url: openai_vacancy_filter.base_url → openai.completion_endpoint → universal openai_base_url
         vf_base_url = (
             vf_config.get("base_url")
             or openai_cfg.get("completion_endpoint")
             or tool.config.get("openai_base_url")
+            or openai_env.base_url
         )
         if self.ai_filter and not vf_token:
             raise ValueError(
@@ -509,10 +516,18 @@ class Operation(BaseOperation):
             OpenRouterChatClient(OpenRouterConfig(
                 api_key=vf_token,
                 base_url=vf_base_url,
-                model=vf_config.get("model", "gpt-4o-mini"),
+                model=vf_config.get("model") or openai_env.model or "gpt-4o-mini",
                 temperature=vf_config.get("temperature", 0.0),
                 max_completion_tokens=vf_config.get("max_completion_tokens", 1000),
-                reasoning_enabled=False,
+                reasoning_enabled=bool(vf_config.get("reasoning_enabled", False)),
+                reasoning_effort=(
+                    parse_reasoning_effort(
+                        vf_config.get("reasoning_effort"),
+                        "openai_vacancy_filter.reasoning_effort",
+                    )
+                    if vf_config.get("reasoning_effort") is not None
+                    else openai_env.reasoning_effort
+                ),
                 proxies=vf_proxies,
             ))
             if self.ai_filter

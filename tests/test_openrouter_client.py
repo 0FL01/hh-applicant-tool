@@ -30,14 +30,25 @@ TEST_SCHEMA = StructuredOutputSchema(
 
 
 class FakeMessage:
-    def __init__(self, content, reasoning_details=None):
+    def __init__(
+        self,
+        content,
+        reasoning_details=None,
+        reasoning_content=None,
+    ):
         self.content = content
         self.reasoning_details = reasoning_details
+        self.reasoning_content = reasoning_content
 
 
 class FakeResponse:
-    def __init__(self, content, reasoning_details=None):
-        message = FakeMessage(content, reasoning_details)
+    def __init__(
+        self,
+        content,
+        reasoning_details=None,
+        reasoning_content=None,
+    ):
+        message = FakeMessage(content, reasoning_details, reasoning_content)
         self.choices = [type("Choice", (), {"message": message})()]
 
 
@@ -257,3 +268,84 @@ def test_complete_json_retries_on_rate_limit_then_succeeds():
 
     assert result.parsed["action"] == "reply"
     assert len(client.chat.completions.calls) == 2
+
+
+def test_generic_openai_request_uses_effort_and_json_object():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Read this image"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AAAA"},
+                },
+            ],
+        }
+    ]
+    client = FakeClient(
+        [FakeResponse('{"action":"skip","reply_text":"","reason":"done"}')]
+    )
+    chat = OpenRouterChatClient(
+        config=type(
+            "Cfg",
+            (),
+            {
+                "base_url": "https://proxy.example/v1",
+                "api_key": "token",
+                "model": "auto/vision",
+                "temperature": 0.2,
+                "max_completion_tokens": 100,
+                "request_interval_seconds": 0.0,
+                "max_retries_on_rate_limit": 0,
+                "rate_limit_retry_base_seconds": 0.0,
+                "reasoning_enabled": True,
+                "reasoning_effort": "xhigh",
+            },
+        )(),
+        client=client,
+    )
+
+    chat.complete_json(messages, schema=TEST_SCHEMA)
+
+    request = client.chat.completions.calls[0]
+    assert request["messages"] == messages
+    assert request["reasoning_effort"] == "xhigh"
+    assert request["response_format"] == {"type": "json_object"}
+    assert "extra_body" not in request
+
+
+def test_generic_openai_response_preserves_reasoning_content():
+    client = FakeClient(
+        [
+            FakeResponse(
+                "OK",
+                reasoning_content="Checked the request.",
+            )
+        ]
+    )
+    chat = OpenRouterChatClient(
+        config=type(
+            "Cfg",
+            (),
+            {
+                "base_url": "https://proxy.example/v1",
+                "api_key": "token",
+                "model": "auto/reasoning",
+                "temperature": 0.2,
+                "max_completion_tokens": 100,
+                "request_interval_seconds": 0.0,
+                "max_retries_on_rate_limit": 0,
+                "rate_limit_retry_base_seconds": 0.0,
+                "reasoning_enabled": True,
+                "reasoning_effort": "high",
+            },
+        )(),
+        client=client,
+    )
+
+    reply = chat._create([{"role": "user", "content": "hi"}])
+
+    assert reply.reasoning_details == [
+        {"type": "reasoning.text", "text": "Checked the request."}
+    ]

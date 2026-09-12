@@ -5,6 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from openai import OpenAI
@@ -50,19 +51,23 @@ class OpenRouterChatClient:
         if client is not None:
             self.client = client
         else:
-            kwargs: dict[str, Any] = {
-                "base_url": config.base_url,
-                "api_key": config.api_key,
-                "default_headers": {
+            kwargs: dict[str, Any] = {"api_key": config.api_key}
+            if config.base_url:
+                kwargs["base_url"] = config.base_url
+            if self._is_openrouter_endpoint():
+                kwargs["default_headers"] = {
                     "HTTP-Referer": config.referer,
                     "X-Title": config.app_name,
-                },
-            }
+                }
             if config.proxies:
                 proxy_url = config.proxies.get("https") or config.proxies.get("http")
                 if proxy_url:
                     kwargs["http_client"] = httpx.Client(proxy=proxy_url)
             self.client = OpenAI(**kwargs)
+
+    def _is_openrouter_endpoint(self) -> bool:
+        hostname = urlparse(self.config.base_url or "").hostname or ""
+        return hostname == "openrouter.ai" or hostname.endswith(".openrouter.ai")
 
     def _normalize_content(self, content: Any) -> str:
         if isinstance(content, str):
@@ -112,21 +117,37 @@ class OpenRouterChatClient:
         schema: StructuredOutputSchema | None = None,
         require_parameters: bool = False,
     ) -> dict[str, Any]:
-        extra_body: dict[str, Any] = {
-            "reasoning": {"enabled": self.config.reasoning_enabled}
-        }
         request: dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
             "temperature": self.config.temperature,
             "max_completion_tokens": self.config.max_completion_tokens,
-            "extra_body": extra_body,
         }
-        if schema is not None:
-            request["response_format"] = self._response_format(schema)
-            extra_body["plugins"] = [{"id": self.RESPONSE_HEALING_PLUGIN_ID}]
-            if require_parameters:
-                extra_body["provider"] = {"require_parameters": True}
+        reasoning_effort = getattr(self.config, "reasoning_effort", None)
+        if self._is_openrouter_endpoint():
+            reasoning: dict[str, Any]
+            if reasoning_effort is None:
+                reasoning = {"enabled": self.config.reasoning_enabled}
+            elif reasoning_effort == "none":
+                reasoning = {"enabled": False}
+            else:
+                reasoning = {"enabled": True, "effort": reasoning_effort}
+            extra_body: dict[str, Any] = {"reasoning": reasoning}
+            if schema is not None:
+                request["response_format"] = self._response_format(schema)
+                extra_body["plugins"] = [
+                    {"id": self.RESPONSE_HEALING_PLUGIN_ID}
+                ]
+                if require_parameters:
+                    extra_body["provider"] = {"require_parameters": True}
+            request["extra_body"] = extra_body
+        else:
+            if reasoning_effort is not None:
+                request["reasoning_effort"] = reasoning_effort
+            elif self.config.reasoning_enabled:
+                request["reasoning_effort"] = "medium"
+            if schema is not None:
+                request["response_format"] = {"type": "json_object"}
         return request
 
     def _is_provider_routing_error(self, ex: Exception) -> bool:
@@ -159,7 +180,7 @@ class OpenRouterChatClient:
                     attempt + 1
                 )
                 logger.warning(
-                    "OpenRouter rate limited for model %s; retry %s/%s in %.1fs",
+                    "LLM rate limited for model %s; retry %s/%s in %.1fs",
                     self.config.model,
                     attempt + 1,
                     attempts - 1,
@@ -195,7 +216,7 @@ class OpenRouterChatClient:
         _LAST_REQUEST_AT[self.config.api_key] = time.monotonic()
 
     def _raise_request_error(self, ex: Exception) -> None:
-        raise OpenRouterError(f"OpenRouter request failed: {ex}") from ex
+        raise OpenRouterError(f"LLM request failed: {ex}") from ex
 
     def _create(
         self,
@@ -226,11 +247,21 @@ class OpenRouterChatClient:
             except Exception as retry_ex:
                 self._raise_request_error(retry_ex)
         message = response.choices[0].message
+        reasoning_details = self._dump_reasoning_details(
+            getattr(message, "reasoning_details", None)
+        )
+        if reasoning_details is None:
+            reasoning_content = getattr(message, "reasoning_content", None)
+            if reasoning_content:
+                reasoning_details = [
+                    {
+                        "type": "reasoning.text",
+                        "text": str(reasoning_content),
+                    }
+                ]
         return LLMReply(
             content=self._normalize_content(message.content),
-            reasoning_details=self._dump_reasoning_details(
-                getattr(message, "reasoning_details", None)
-            ),
+            reasoning_details=reasoning_details,
         )
 
     def send_message(
