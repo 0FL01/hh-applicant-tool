@@ -84,7 +84,12 @@ class Operation(BaseOperation):
 
     @property
     def selector_timeout(self) -> int | None:
-        return None if self.is_headless else 5000
+        if not self.is_automated:
+            return 5000
+        # Headless-автомат на медленной VDS: щедрый таймаут вместо
+        # playwright-дефолта (None -> 30s), иначе тяжёлые формы hh.ru
+        # не успевают отрендериться в software-рендеринге.
+        return 120000
 
     def setup_parser(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("username", nargs="?", help="Email или телефон")
@@ -303,10 +308,31 @@ class Operation(BaseOperation):
             f"{self.SEL_LOGIN_INPUT}"
         ).first
         await login_field.press("Enter")
-        await self._handle_captcha(page)
-        await page.wait_for_selector(
-            self.SEL_CODE_CONTAINER, timeout=self.selector_timeout
-        )
+        # Капчу могут попросить повторно, если текст введён неверно:
+        # тогда вместо формы кода снова появляется картинка капчи.
+        # Крутим попытки в рамках одного запуска, чтобы не слать новый SMS.
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            # Первая проверка короткая: если капчи не будет вообще,
+            # не маринуем пользователя полный таймаут.
+            await self._handle_captcha(
+                page, timeout=20000 if attempt == 1 else None
+            )
+            try:
+                await page.wait_for_selector(
+                    self.SEL_CODE_CONTAINER,
+                    timeout=self.selector_timeout,
+                    state="visible",
+                )
+                break
+            except PlaywrightTimeoutError:
+                if attempt >= max_attempts:
+                    raise
+                print(
+                    "[...] Форма кода не появилась - возможно, текст капчи "
+                    f"введён неверно. Пробуем ещё раз "
+                    f"({attempt + 1}/{max_attempts})."
+                )
 
         print("📨 Код был отправлен. Проверьте почту или SMS.")
         code = (
@@ -319,26 +345,32 @@ class Operation(BaseOperation):
         await page.press(self.SEL_PIN_CODE_INPUT, "Enter")
         logger.debug("Форма с кодом отправлена")
 
-    async def _handle_captcha(self, page):
+    async def _handle_captcha(
+        self, page, timeout: int | None = None
+    ) -> bool:
+        """Разбирает капчу, если она показана.
+
+        Возвращает True, если капча была и её отправили, иначе False.
+        """
         try:
             captcha_element = await page.wait_for_selector(
                 self.SEL_CAPTCHA_IMAGE,
-                timeout=self.selector_timeout,
+                timeout=self.selector_timeout if timeout is None else timeout,
                 state="visible",
             )
         except PlaywrightTimeoutError:
             # Картинка капчи не появилась - значит, капчи нет:
             # продолжаем обычную авторизацию (например, ввод SMS-кода).
             logger.debug("Капчи нет, продолжаем.")
-            return
+            return False
         except PlaywrightError as ex:
             if "has been closed" in str(ex):
                 logger.debug("Браузер был закрыт до завершения ожидания капчи")
-                return
+                return False
             raise
         except Exception:
             logger.debug("Капчи нет, продолжаем.")
-            return
+            return False
 
         args = self._tool.args
         if not (args.use_kitty or args.use_sixel):
@@ -365,6 +397,7 @@ class Operation(BaseOperation):
         await page.fill(self.SEL_CAPTCHA_INPUT, captcha_text)
         await page.press(self.SEL_CAPTCHA_INPUT, "Enter")
         logger.debug("Капча отправлена")
+        return True
 
     @staticmethod
     def _resolve_android_device(
