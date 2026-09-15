@@ -83,5 +83,11 @@ services:
       - TERM=${TERM}
       - TELEGRAM_COLLECTOR_LISTEN_HOST=${TELEGRAM_COLLECTOR_LISTEN_HOST:-0.0.0.0}
       - TELEGRAM_COLLECTOR_LISTEN_PORT=${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}
+      # Telegram заблокирован на некоторых хостингах РФ: исходящие вызовы
+      # Telegram Bot API идут через локальный HTTP-прокси (gost в warp-namespace).
+      # requests учитывает эти переменные автоматически; переменная не задана -
+      # прокси не используется. Inbound вебхуки не затрагиваются.
+      - HTTPS_PROXY=${TELEGRAM_EGRESS_PROXY:-}
+      - NO_PROXY=localhost,127.0.0.1,tg_contact_collector
     ports:
       - "127.0.0.1:${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}:${TELEGRAM_COLLECTOR_LISTEN_PORT:-8787}"
