@@ -13,8 +13,12 @@ SHELL=/bin/bash
 
 # Рассылаем отклики
 # Тесты вакансий парсятся через HH-Lux-InitialState; если тест не спарсился -
-# apply-vacancies сам откатывается на обычный отклик, поэтому skip-tests не нужен
-0 8-21 * * * /bin/bash -c 'sleep $((60 + RANDOM \% 241))' && /usr/local/bin/python -m hh_applicant_tool apply-vacancies --letter-file /app/letter.txt -f --excluded-filter 'junior|стажировк|bitrix|ddd|web3|crypto|blockchain|дружн\\w+коллектив|полиграф|open\\s*space|опенспейс|хакатон|конкурс|тестов\\w+ задан|soft skill' >> /var/log/cron.log 2>&1
+# apply-vacancies сам откатывается на обычный отклик, поэтому skip-tests не нужен.
+# Гуманизация темпа: --max-responses 15 (worst-case ~44 мин < часа) + пауза
+# random 30-120с между успехами. flock -n на ВСЮ связку (sleep+python в одном
+# bash -c): без него под локом оказался бы только sleep. Код выхода пробрасываем
+# как есть (lock занят -> 1), чтобы не маскировать реальные сбои.
+0 8-21 * * * /usr/bin/flock -n /tmp/hh_apply.lock /bin/bash -c 'sleep $((60 + RANDOM \% 541)) && exec /usr/local/bin/python -m hh_applicant_tool apply-vacancies --letter-file /app/letter.txt -f --max-responses 15 --excluded-filter '\''junior|стажировк|bitrix|ddd|web3|crypto|blockchain|дружн\\w+коллектив|полиграф|open\\s*space|опенспейс|хакатон|конкурс|тестов\\w+ задан|soft skill'\'' >> /var/log/cron.log 2>&1' >> /var/log/cron.log 2>&1
 
 # Тест: каждые 5 минут (задержка до 1 минуты, чтобы не накладывались)
 #*/5 * * * * /bin/bash -c 'sleep $((1 + RANDOM \% 59))' && /usr/local/bin/python -m hh_applicant_tool apply-vacancies >> /var/log/cron.log 2>&1

@@ -45,6 +45,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__package__)
 
 
+def validate_apply_delays(delay_min: float, delay_max: float) -> None:
+    """Проверяет границы паузы между откликами (fail-fast до рассылки)."""
+    if delay_min < 0 or delay_max < 0:
+        raise ValueError(
+            "--apply-delay-min/--apply-delay-max должны быть >= 0, "
+            f"получено min={delay_min}, max={delay_max}"
+        )
+    if delay_min > delay_max:
+        raise ValueError(
+            "--apply-delay-min не может быть больше --apply-delay-max, "
+            f"получено min={delay_min}, max={delay_max}"
+        )
+
+
 class Namespace(BaseNamespace):
     resume_id: str | None
     letter_file: Path | None
@@ -85,6 +99,8 @@ class Namespace(BaseNamespace):
     total_pages: int
     excluded_filter: str | None
     max_responses: int
+    apply_delay_min: float
+    apply_delay_max: float
     send_email: bool
     dedupe_vacancies: bool
     # HOTFIX(2026-04-07): Временное решение для обхода бага с парсингом тестов.
@@ -105,6 +121,8 @@ class Operation(BaseOperation):
     excluded_keywords_env_name = "HH_APPLY_EXCLUDED_KEYWORDS"
     ai_filter: str | None = None
     ai_rate_limit: int = 0
+    apply_delay_min: float = 30.0
+    apply_delay_max: float = 120.0
 
     def setup_parser(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--resume-id", help="Идентефикатор резюме")
@@ -170,7 +188,19 @@ class Operation(BaseOperation):
         parser.add_argument(
             "--max-responses",
             type=int,
-            help="Пропускать отклик на вакансии с более чем N откликов",
+            help="Остановить рассылку после N успешных откликов за запуск",
+        )
+        parser.add_argument(
+            "--apply-delay-min",
+            type=float,
+            default=30.0,
+            help="Минимальная пауза в секундах между успешными откликами (гуманизация темпа)",
+        )
+        parser.add_argument(
+            "--apply-delay-max",
+            type=float,
+            default=120.0,
+            help="Максимальная пауза в секундах между успешными откликами (гуманизация темпа)",
         )
         parser.add_argument(
             "--dry-run",
@@ -455,6 +485,10 @@ class Operation(BaseOperation):
         self.label = args.label
         self.left_lng = args.left_lng
         self.max_responses = args.max_responses
+        # Гуманизация темпа: пауза random(min, max) после каждого успеха.
+        self.apply_delay_min = args.apply_delay_min
+        self.apply_delay_max = args.apply_delay_max
+        validate_apply_delays(self.apply_delay_min, self.apply_delay_max)
         self.metro = args.metro
         self.no_magic = args.no_magic
         self.only_with_salary = args.only_with_salary
@@ -973,6 +1007,25 @@ class Operation(BaseOperation):
                     )
                     # Считаем только реальные попытки отклика (включая тесты).
                     applied_count += 1
+                    # Гуманизация темпа: случайная пауза между успехами.
+                    # В dry-run не спим; перед выходом по лимиту тоже.
+                    if not self.dry_run and not (
+                        self.max_responses
+                        and applied_count >= self.max_responses
+                    ):
+                        delay = random.uniform(
+                            self.apply_delay_min, self.apply_delay_max
+                        )
+                        logger.debug(
+                            "Пауза %.1fс перед следующим откликом", delay
+                        )
+                        cancel_event = getattr(self, "_cancel_event", None)
+                        if cancel_event is not None:
+                            if cancel_event.wait(delay):
+                                logger.info("Операция отменена пользователем")
+                                break
+                        else:
+                            time.sleep(delay)
 
                 # Отправка письма на email
                 if self.args.send_email:

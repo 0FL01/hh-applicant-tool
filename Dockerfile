@@ -53,8 +53,13 @@ RUN touch /var/log/cron.log && chown docker:docker /var/log/cron.log && \
 # Запускаем крон и читаем лог
 # cron не видит переменные окружения, переданные главному процессу, точнее
 # он начинает новую сессию, где тот же $CONFIG_DIR пуст
-CMD printenv | grep -E 'CONFIG_DIR|HH_PROFILE_ID' >> /etc/environment && \
+# spool переустанавливаем на старте: репозиторий подмонтирован volume-ом .:/app,
+# и запечённый при сборке spool иначе молча рассинхронизируется с /app/crontab.
+# dos2unix нужен и здесь: bind-mount аннулирует build-time конвертацию.
+CMD printenv | grep -E 'CONFIG_DIR|HH_PROFILE_ID' > /etc/environment && \
   mkdir -p /app/config && \
   chown -R docker:docker /app/config && \
+  dos2unix /app/crontab && \
+  crontab -u docker /app/crontab && \
   cron && \
   tail -f /var/log/cron.log

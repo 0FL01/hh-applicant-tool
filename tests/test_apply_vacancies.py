@@ -11,6 +11,9 @@ openai_module.OpenAI = object
 sys.modules.setdefault("openai", openai_module)
 
 from hh_applicant_tool.operations.apply_vacancies import Operation
+from hh_applicant_tool.operations.apply_vacancies import (
+    validate_apply_delays,
+)
 from hh_applicant_tool.storage import StorageFacade
 
 
@@ -136,6 +139,8 @@ def make_operation(vacancies, descriptions, *, dry_run=False):
     )
     operation = Operation()
     operation.tool = tool
+    operation.apply_delay_min = 0
+    operation.apply_delay_max = 0
     operation.cover_letter = ""
     operation.dedupe_vacancies = True
     operation.dry_run = dry_run
@@ -465,3 +470,84 @@ def test_work_format_filter_passes_when_vacancy_has_no_format():
 
     assert len(api_client.post_calls) == 1
     assert api_client.post_calls[0]["params"]["vacancy_id"] == "101"
+
+
+def _make_pause_recorders(monkeypatch):
+    import random as random_module
+    import time as time_module
+
+    uniform_calls = []
+    sleep_calls = []
+
+    def fake_uniform(a, b):
+        uniform_calls.append((a, b))
+        return 7.5
+
+    monkeypatch.setattr(random_module, "uniform", fake_uniform)
+    monkeypatch.setattr(time_module, "sleep", sleep_calls.append)
+    return uniform_calls, sleep_calls
+
+
+def test_apply_pauses_between_successes(monkeypatch):
+    """Каждый успех -> пауза; uniform вызван с (min, max), sleep - с его значением."""
+    vacancies = [make_vacancy(str(100 + i)) for i in range(3)]
+    operation, tool, api_client = make_operation(
+        vacancies,
+        {str(100 + i): f"<p>Description {i}</p>" for i in range(3)},
+    )
+    operation.apply_delay_min = 30.0
+    operation.apply_delay_max = 120.0
+    uniform_calls, sleep_calls = _make_pause_recorders(monkeypatch)
+
+    operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert len(api_client.post_calls) == 3
+    assert (30.0, 120.0) in uniform_calls
+    assert sleep_calls.count(7.5) == 3
+
+
+def test_apply_does_not_sleep_in_dry_run(monkeypatch):
+    """Dry-run ничего не отправляет и не спит (быстрая симуляция)."""
+    vacancies = [make_vacancy(str(100 + i)) for i in range(2)]
+    operation, tool, api_client = make_operation(
+        vacancies,
+        {str(100 + i): f"<p>Description {i}</p>" for i in range(2)},
+        dry_run=True,
+    )
+    operation.apply_delay_min = 30.0
+    operation.apply_delay_max = 120.0
+    _, sleep_calls = _make_pause_recorders(monkeypatch)
+
+    operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert api_client.post_calls == []
+    assert sleep_calls == []
+
+
+def test_apply_skips_pause_before_limit_stop(monkeypatch):
+    """Паузы нет после последнего отклика перед выходом по лимиту."""
+    vacancies = [make_vacancy(str(100 + i)) for i in range(3)]
+    operation, tool, api_client = make_operation(
+        vacancies,
+        {str(100 + i): f"<p>Description {i}</p>" for i in range(3)},
+    )
+    operation.apply_delay_min = 30.0
+    operation.apply_delay_max = 120.0
+    operation.max_responses = 2
+    _, sleep_calls = _make_pause_recorders(monkeypatch)
+
+    operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert len(api_client.post_calls) == 2
+    assert sleep_calls.count(7.5) == 1
+
+
+def test_validate_apply_delays_rejects_bad_bounds():
+    with pytest.raises(ValueError, match=">= 0"):
+        validate_apply_delays(-1.0, 120.0)
+    with pytest.raises(ValueError, match=">= 0"):
+        validate_apply_delays(30.0, -5.0)
+    with pytest.raises(ValueError, match="не может быть больше"):
+        validate_apply_delays(120.0, 30.0)
+    validate_apply_delays(30.0, 120.0)
+    validate_apply_delays(0.0, 0.0)
