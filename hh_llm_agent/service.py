@@ -306,6 +306,14 @@ class ChatAgentService:
         resumes: dict[str, dict],
         blacklisted: set[str],
     ) -> None:
+        if not negotiation.get("resume"):
+            # hh.ru иногда отдаёт переговоры без привязки к резюме
+            # (resume=null): ни сохранить в БД (NegotiationModel требует
+            # resume.id), ни ответить осмысленно нельзя. Пропускаем так же,
+            # как reply-employers (upstream 737dc94).
+            self._skip(negotiation, reason="resume_missing")
+            return
+
         self.tool.storage.negotiations.save(negotiation)
 
         resume = resumes.get(negotiation["resume"]["id"])

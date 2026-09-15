@@ -859,6 +859,34 @@ def test_is_bot_loop_not_triggered_when_no_prior_answer():
     assert service._is_bot_loop(messages, employer_tail) is False
 
 
+def test_process_negotiation_skips_null_resume_without_error(monkeypatch):
+    # Регрессия с продакшена: hh.ru отдал переговоры с resume=null,
+    # NegotiationModel требует resume.id и весь run падал с
+    # "missing 1 required keyword-only argument: 'resume_id'".
+    FakeLLMClient.reset()
+    tool = make_tool()
+
+    null_resume_negotiation = {**NEGOTIATION, "resume": None}
+
+    class NullResumeGateway(FakeGateway):
+        def get_negotiations(self):
+            return [null_resume_negotiation]
+
+    gateway = NullResumeGateway()
+    service = make_service(monkeypatch, tool, gateway, dry_run=True)
+
+    stats = service.run()
+
+    assert stats.skipped == 1
+    assert stats.replied == 0
+    assert stats.errors == 0
+    assert gateway.sent_messages == []
+    classifier_instances = FakeLLMClient.by_model(CLASSIFIER_MODEL)
+    reply_instances = FakeLLMClient.by_model(REPLY_MODEL)
+    assert sum(len(i.calls) for i in classifier_instances) == 0
+    assert sum(len(i.calls) for i in reply_instances) == 0
+
+
 def test_process_negotiation_skips_bot_loop_without_llm_calls(monkeypatch):
     FakeLLMClient.reset()
     tool = make_tool()
