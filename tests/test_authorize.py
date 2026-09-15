@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 
 from hh_applicant_tool.operations.authorize import Operation
+from hh_applicant_tool.operations.authorize import (
+    PlaywrightTimeoutError,
+)
 
 
 def test_resolve_android_device_uses_preferred_fallback_when_default_missing():
@@ -64,3 +70,19 @@ def test_login_selectors_cover_magritte_form_with_fallbacks():
 def test_national_phone_strips_country_code(username, expected):
     # Вызывается только для не-email логинов (guard в _fill_username).
     assert Operation._national_phone(username) == expected
+
+
+def test_handle_captcha_absent_does_not_raise():
+    # Регрессия: картинка капчи не появилась (hh её не показал) -
+    # _handle_captcha должен молча продолжить авторизацию, а не ронять
+    # весь run таймаутом wait_for_selector.
+
+    class _NoCaptchaPage:
+        async def wait_for_selector(self, *args, **kwargs):
+            raise PlaywrightTimeoutError("Timeout 30000ms exceeded.")
+
+    operation = Operation()
+    operation._tool = SimpleNamespace(
+        args=SimpleNamespace(no_headless=False, manual=False)
+    )
+    asyncio.run(operation._handle_captcha(_NoCaptchaPage()))

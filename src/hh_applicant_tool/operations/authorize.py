@@ -9,13 +9,17 @@ from collections.abc import Mapping
 from contextlib import suppress
 from datetime import datetime
 from http.cookiejar import Cookie
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
 try:
     from playwright.async_api import Error as PlaywrightError
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
     from playwright.async_api import async_playwright
 except ImportError:
+    PlaywrightError = Exception
+    PlaywrightTimeoutError = Exception
     async_playwright = None
 
 from ..main import BaseOperation
@@ -322,6 +326,11 @@ class Operation(BaseOperation):
                 timeout=self.selector_timeout,
                 state="visible",
             )
+        except PlaywrightTimeoutError:
+            # Картинка капчи не появилась - значит, капчи нет:
+            # продолжаем обычную авторизацию (например, ввод SMS-кода).
+            logger.debug("Капчи нет, продолжаем.")
+            return
         except PlaywrightError as ex:
             if "has been closed" in str(ex):
                 logger.debug("Браузер был закрыт до завершения ожидания капчи")
@@ -338,6 +347,12 @@ class Operation(BaseOperation):
             )
 
         img_bytes = await captcha_element.screenshot()
+        try:
+            captcha_path = Path(self._tool.config_path) / "captcha.png"
+            captcha_path.write_bytes(img_bytes)
+            print(f"[...] Капча также сохранена в файл: {captcha_path}")
+        except Exception as ex:
+            logger.debug("Не удалось сохранить капчу в файл: %s", ex)
         print("\n[!] Требуется ввод капчи.")
         if args.use_kitty:
             print_kitty_image(img_bytes)
