@@ -193,7 +193,11 @@ class Operation(BaseOperation):
                 await page.goto(
                     api_client.oauth_client.authorize_url,
                     timeout=60000,
-                    wait_until="load",
+                    # OAuth-странице hh.ru не нужно ждать полной загрузки
+                    # ресурсов (трекеры/реклама могут никогда не отдать load
+                    # в headless): нам достаточно DOM с формой логина,
+                    # её готовность проверяет wait_for_selector ниже.
+                    wait_until="domcontentloaded",
                 )
 
                 if self.is_automated:
