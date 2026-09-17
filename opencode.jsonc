@@ -11,7 +11,7 @@
         "--log-level",
         "INFO"
       ],
-      "enabled": true,
+      "enabled": false,
       // Tools: hh_whoami, hh_list_resumes, hh_search_vacancies,
       //        hh_get_vacancy, hh_analyze_vacancy, hh_research_vacancies,
       //        hh_apply_vacancy (dry-run default), hh_research_and_apply
@@ -27,6 +27,19 @@
       // "command": ["python3", "-m", "hh_applicant_tool.mcp.server", "--profile-id", "second", "--log-level", "INFO"],
       // Таймаут на получение списка tools (ms). По умолчанию 5000, увеличен для HH API
       "timeout": 30000
+    },
+    "ssh-n-ru1": {
+      "type": "local",
+      "command": [
+        "/usr/bin/ssh-mcp",
+        "--host=213.171.27.211",
+        "--port=41924",
+        "--user=user1",
+        "--key=/home/stfu/.ssh/oxide",
+        "--log-level=trace",
+        "--log-file=/tmp/ssh-mcp-opencode.log"
+      ],
+      "enabled": true
     }
   }
 }
