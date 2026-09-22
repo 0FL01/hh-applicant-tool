@@ -1284,7 +1284,9 @@ class Operation(BaseOperation):
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=True)
             try:
-                context = await browser.new_context()
+                api_user_agent = getattr(self.api_client, "user_agent", None)
+                context_options = {"user_agent": api_user_agent} if api_user_agent else {}
+                context = await browser.new_context(**context_options)
                 existing_cookies = self._get_playwright_cookies()
                 if existing_cookies:
                     await context.add_cookies(existing_cookies)

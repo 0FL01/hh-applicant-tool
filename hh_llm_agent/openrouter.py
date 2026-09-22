@@ -292,8 +292,9 @@ class OpenRouterChatClient:
                 {
                     "role": "system",
                     "content": (
-                        "Распознай текст на изображении. Верни только текст, "
-                        "без объяснений и дополнительных символов."
+                        "Распознай CAPTCHA слева направо. Верни только видимые "
+                        "символы в исходном порядке и регистре, без пробелов, "
+                        "кавычек и пояснений."
                     ),
                 },
                 {
@@ -307,7 +308,10 @@ class OpenRouterChatClient:
                         },
                         {
                             "type": "text",
-                            "text": "Распознай текст на изображении.",
+                            "text": (
+                                "Выведи одну строку из символов изображения; "
+                                "не группируй символы и не вставляй пробелы."
+                            ),
                         },
                     ],
                 },
@@ -327,7 +331,7 @@ class OpenRouterChatClient:
         message = response.choices[0].message
         if message.content is None:
             return ""
-        return self._normalize_content(message.content)
+        return "".join(self._normalize_content(message.content).split())
 
     def complete_json(
         self,

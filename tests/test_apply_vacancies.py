@@ -528,7 +528,8 @@ def test_playwright_captcha_flow_submits_and_syncs_only_hh_cookies(
             ]
 
     class FakeBrowser:
-        async def new_context(self):
+        async def new_context(self, **kwargs):
+            calls["context_options"] = kwargs
             return FakeContext()
 
         async def close(self):
@@ -563,6 +564,7 @@ def test_playwright_captcha_flow_submits_and_syncs_only_hh_cookies(
     operation._captcha_ai = FakeVisionClient()
     operation.tool = SimpleNamespace(
         session=SimpleNamespace(cookies=RequestsCookieJar()),
+        api_client=SimpleNamespace(user_agent="ru.hh.android/test"),
     )
 
     solved = asyncio.run(
@@ -573,6 +575,9 @@ def test_playwright_captcha_flow_submits_and_syncs_only_hh_cookies(
 
     assert solved is True
     assert calls["launch"] == {"headless": True}
+    assert calls["context_options"] == {
+        "user_agent": "ru.hh.android/test",
+    }
     assert calls["image_selector"] == Operation.SEL_CAPTCHA_IMAGE
     assert calls["ocr_image"] == b"captcha-image"
     assert calls["fill"] == (Operation.SEL_CAPTCHA_INPUT, "A1B2")
