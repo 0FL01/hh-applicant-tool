@@ -1332,7 +1332,57 @@ class Operation(BaseOperation):
                 # Do not treat a still-visible CAPTCHA element as a failure:
                 # some HH pages retain it after submission. The API retry below
                 # is the authoritative check and is limited to one attempt.
-                self._merge_playwright_cookies(await context.cookies())
+                try:
+                    page_feedback = await page.evaluate(
+                        """() => {
+                            const input = document.querySelector(
+                                'input[data-qa="account-captcha-input"]'
+                            );
+                            const error = document.querySelector(
+                                '[role="alert"], [data-qa*="captcha-error"]'
+                            );
+                            return {
+                                inputInvalid:
+                                    input?.getAttribute('aria-invalid') === 'true',
+                                hasValidationAlert: Boolean(error),
+                            };
+                        }"""
+                    )
+                except Exception:
+                    page_feedback = {}
+
+                updated_cookies = await context.cookies()
+                cookie_values_before = {
+                    (
+                        cookie.get("name"),
+                        cookie.get("domain"),
+                        cookie.get("path") or "/",
+                    ): cookie.get("value")
+                    for cookie in existing_cookies
+                }
+                changed_hh_cookie_count = sum(
+                    1
+                    for cookie in updated_cookies
+                    if self._is_hh_cookie_domain(
+                        str(cookie.get("domain") or "")
+                    )
+                    and cookie_values_before.get(
+                        (
+                            cookie.get("name"),
+                            cookie.get("domain"),
+                            cookie.get("path") or "/",
+                        )
+                    )
+                    != cookie.get("value")
+                )
+                logger.info(
+                    "CAPTCHA browser submission state: input_invalid=%s, "
+                    "validation_alert=%s, HH_cookies_added_or_changed=%d",
+                    page_feedback.get("inputInvalid"),
+                    page_feedback.get("hasValidationAlert"),
+                    changed_hh_cookie_count,
+                )
+                self._merge_playwright_cookies(updated_cookies)
                 return True
             except CaptchaSolveError:
                 raise

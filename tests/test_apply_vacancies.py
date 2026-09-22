@@ -503,6 +503,13 @@ def test_playwright_captcha_flow_submits_and_syncs_only_hh_cookies(
         async def wait_for_load_state(self, state, **kwargs):
             calls["load_state"] = state
 
+        async def evaluate(self, script):
+            calls["feedback_script"] = script
+            return {
+                "inputInvalid": False,
+                "hasValidationAlert": False,
+            }
+
     class FakeContext:
         async def add_cookies(self, cookies):
             calls["added_cookies"] = cookies
@@ -582,6 +589,7 @@ def test_playwright_captcha_flow_submits_and_syncs_only_hh_cookies(
     assert calls["ocr_image"] == b"captcha-image"
     assert calls["fill"] == (Operation.SEL_CAPTCHA_INPUT, "A1B2")
     assert calls["press"] == (Operation.SEL_CAPTCHA_INPUT, "Enter")
+    assert "aria-invalid" in calls["feedback_script"]
     assert calls["closed"] is True
     synced = list(operation.tool.session.cookies)
     assert [(cookie.name, cookie.domain) for cookie in synced] == [
