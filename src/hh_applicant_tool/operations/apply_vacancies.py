@@ -1338,13 +1338,29 @@ class Operation(BaseOperation):
                             const input = document.querySelector(
                                 'input[data-qa="account-captcha-input"]'
                             );
-                            const error = document.querySelector(
-                                '[role="alert"], [data-qa*="captcha-error"]'
+                            const captchaError = document.querySelector(
+                                '[data-qa*="captcha-error"]'
                             );
+                            const alerts = Array.from(
+                                document.querySelectorAll('[role="alert"]')
+                            );
+                            const alertText = [
+                                ...alerts,
+                                ...(captchaError ? [captchaError] : []),
+                            ].map((node) => node.textContent || "")
+                                .join(" ")
+                                .toLowerCase();
                             return {
                                 inputInvalid:
                                     input?.getAttribute('aria-invalid') === 'true',
-                                hasValidationAlert: Boolean(error),
+                                inputMaxLength: input?.maxLength ?? null,
+                                hasValidationAlert:
+                                    alerts.length > 0 || Boolean(captchaError),
+                                hasCaptchaErrorMarker: Boolean(captchaError),
+                                rejectionMessage:
+                                    /невер|неправ|ошиб|incorrect|wrong|invalid/.test(
+                                        alertText
+                                    ),
                             };
                         }"""
                     )
@@ -1376,10 +1392,16 @@ class Operation(BaseOperation):
                     != cookie.get("value")
                 )
                 logger.info(
-                    "CAPTCHA browser submission state: input_invalid=%s, "
-                    "validation_alert=%s, HH_cookies_added_or_changed=%d",
+                    "CAPTCHA browser submission state: OCR_chars=%d, "
+                    "input_max_length=%s, input_invalid=%s, "
+                    "validation_alert=%s, captcha_error_marker=%s, "
+                    "rejection_message=%s, HH_cookies_added_or_changed=%d",
+                    len(captcha_text),
+                    page_feedback.get("inputMaxLength"),
                     page_feedback.get("inputInvalid"),
                     page_feedback.get("hasValidationAlert"),
+                    page_feedback.get("hasCaptchaErrorMarker"),
+                    page_feedback.get("rejectionMessage"),
                     changed_hh_cookie_count,
                 )
                 self._merge_playwright_cookies(updated_cookies)

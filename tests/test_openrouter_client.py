@@ -386,6 +386,7 @@ def test_solve_captcha_sends_image_without_reasoning_parameters():
     assert "extra_body" not in request
     assert "без пробелов" in request["messages"][0]["content"]
     assert "не вставляй пробелы" in request["messages"][1]["content"][1]["text"]
+    assert request["messages"][1]["content"][0]["image_url"]["detail"] == "high"
     image = request["messages"][1]["content"][0]["image_url"]["url"]
     assert image == "data:image/png;base64," + base64.b64encode(
         b"captcha-png"

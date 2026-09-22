@@ -506,8 +506,11 @@ def test_playwright_captcha_flow_submits_and_syncs_only_hh_cookies(
         async def evaluate(self, script):
             calls["feedback_script"] = script
             return {
+                "inputMaxLength": 10,
                 "inputInvalid": False,
                 "hasValidationAlert": False,
+                "hasCaptchaErrorMarker": False,
+                "rejectionMessage": False,
             }
 
     class FakeContext:
@@ -590,6 +593,8 @@ def test_playwright_captcha_flow_submits_and_syncs_only_hh_cookies(
     assert calls["fill"] == (Operation.SEL_CAPTCHA_INPUT, "A1B2")
     assert calls["press"] == (Operation.SEL_CAPTCHA_INPUT, "Enter")
     assert "aria-invalid" in calls["feedback_script"]
+    assert "inputMaxLength" in calls["feedback_script"]
+    assert "rejectionMessage" in calls["feedback_script"]
     assert calls["closed"] is True
     synced = list(operation.tool.session.cookies)
     assert [(cookie.name, cookie.domain) for cookie in synced] == [
