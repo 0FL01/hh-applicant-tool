@@ -475,7 +475,7 @@ def test_captcha_url_rejects_nonstandard_port_and_userinfo():
             )
 
 
-def test_playwright_captcha_flow_uses_image_and_syncs_only_hh_cookies(
+def test_playwright_captcha_flow_submits_and_syncs_only_hh_cookies(
     monkeypatch,
 ):
     calls = {}
@@ -483,10 +483,6 @@ def test_playwright_captcha_flow_uses_image_and_syncs_only_hh_cookies(
     class FakeImage:
         async def screenshot(self):
             return b"captcha-image"
-
-    class FakeLocator:
-        async def is_visible(self):
-            return False
 
     class FakePage:
         async def goto(self, url, **kwargs):
@@ -506,10 +502,6 @@ def test_playwright_captcha_flow_uses_image_and_syncs_only_hh_cookies(
 
         async def wait_for_load_state(self, state, **kwargs):
             calls["load_state"] = state
-
-        def locator(self, selector):
-            calls["verify_selector"] = selector
-            return FakeLocator()
 
     class FakeContext:
         async def add_cookies(self, cookies):

@@ -1324,14 +1324,12 @@ class Operation(BaseOperation):
                     )
                 except PlaywrightTimeoutError:
                     # Some HH pages keep background requests open; success is
-                    # established by the challenge form disappearing below.
+                    # established by retrying the original API request.
                     pass
 
-                if await page.locator(self.SEL_CAPTCHA_IMAGE).is_visible():
-                    raise CaptchaSolveError(
-                        "HH не принял ответ CAPTCHA; API-запрос не повторяется."
-                    )
-
+                # Do not treat a still-visible CAPTCHA element as a failure:
+                # some HH pages retain it after submission. The API retry below
+                # is the authoritative check and is limited to one attempt.
                 self._merge_playwright_cookies(await context.cookies())
                 return True
             except CaptchaSolveError:
