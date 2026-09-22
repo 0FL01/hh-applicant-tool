@@ -292,9 +292,11 @@ class OpenRouterChatClient:
                 {
                     "role": "system",
                     "content": (
-                        "Распознай CAPTCHA слева направо. Верни только видимые "
-                        "символы в исходном порядке и регистре, без пробелов, "
-                        "кавычек и пояснений."
+                        "Распознай короткий код CAPTCHA слева направо. Верни "
+                        "JSON-объект с единственным строковым полем "
+                        '"captcha_text": в нём только видимые символы кода, '
+                        "в исходном порядке и регистре, без пробелов "
+                        "и пояснений."
                     ),
                 },
                 {
@@ -310,17 +312,19 @@ class OpenRouterChatClient:
                         {
                             "type": "text",
                             "text": (
-                                "Выведи одну строку из символов изображения; "
-                                "не группируй символы и не вставляй пробелы."
+                                "Помести только код с изображения в строковое "
+                                "поле JSON captcha_text."
                             ),
                         },
                     ],
                 },
             ],
-            # OCR should be deterministic and must not inherit OPENAI_REASONING;
-            # some OpenAI-compatible vision endpoints reject reasoning options.
+            # JSON mode bounds the model output to the actual code rather than
+            # an explanation. OCR stays deterministic and does not inherit
+            # OPENAI_REASONING, which some compatible endpoints reject.
             "temperature": 0.0,
-            "max_completion_tokens": 20,
+            "max_completion_tokens": 64,
+            "response_format": {"type": "json_object"},
             "stream": False,
             "timeout": 45.0,
         }
@@ -332,7 +336,19 @@ class OpenRouterChatClient:
         message = response.choices[0].message
         if message.content is None:
             return ""
-        return "".join(self._normalize_content(message.content).split())
+        try:
+            result = json.loads(self._normalize_content(message.content))
+        except json.JSONDecodeError as ex:
+            raise OpenRouterError(
+                "Vision model returned invalid CAPTCHA JSON."
+            ) from ex
+        if (
+            not isinstance(result, dict)
+            or set(result) != {"captcha_text"}
+            or not isinstance(result.get("captcha_text"), str)
+        ):
+            raise OpenRouterError("Vision model returned invalid CAPTCHA JSON.")
+        return "".join(result["captcha_text"].split())
 
     def complete_json(
         self,
