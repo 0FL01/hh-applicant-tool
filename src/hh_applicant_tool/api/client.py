@@ -4,10 +4,12 @@ import dataclasses
 import json
 import logging
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from functools import cached_property
 from threading import Lock
-from typing import Any, Literal, TypeVar
+from typing import Any, Callable, Iterator, Literal, TypeVar
 from urllib.parse import urlencode, urljoin
 
 import requests
@@ -215,6 +217,27 @@ class ApiClient(BaseClient):
     client_id: str | None = None
     client_secret: str | None = None
     base_url: str = HH_API_URL
+    _captcha_handler: ContextVar[
+        Callable[[errors.CaptchaRequired], None] | None
+    ] = dataclasses.field(
+        default_factory=lambda: ContextVar(
+            "hh_api_captcha_handler",
+            default=None,
+        ),
+        init=False,
+        repr=False,
+    )
+
+    @contextmanager
+    def handle_captcha(
+        self,
+        handler: Callable[[errors.CaptchaRequired], None],
+    ) -> Iterator[None]:
+        token: Token = self._captcha_handler.set(handler)
+        try:
+            yield
+        finally:
+            self._captcha_handler.reset(token)
 
     @property
     def is_access_expired(self) -> bool:
@@ -255,16 +278,28 @@ class ApiClient(BaseClient):
                 self, method, endpoint, params, delay, as_json, **kwargs
             )
 
-        try:
-            return do_request()
-        # TODO: добавить класс для ошибок типа AccessTokenExpired
-        except errors.Forbidden as ex:
-            if not self.is_access_expired or not self.refresh_token:
-                raise ex
-            if self.is_access_expired:
+        captcha_retried = False
+        token_refreshed = False
+        while True:
+            try:
+                return do_request()
+            except errors.CaptchaRequired as ex:
+                captcha_handler = self._captcha_handler.get()
+                if captcha_retried or captcha_handler is None:
+                    raise
+                captcha_retried = True
+                captcha_handler(ex)
+            # TODO: добавить класс для ошибок типа AccessTokenExpired
+            except errors.Forbidden:
+                if (
+                    token_refreshed
+                    or not self.is_access_expired
+                    or not self.refresh_token
+                ):
+                    raise
                 logger.info("try to refresh access_token")
-            self.refresh_access_token()
-            return do_request()
+                self.refresh_access_token()
+                token_refreshed = True
 
     def handle_access_token(self, token: AccessToken) -> None:
         for field in ("access_token", "refresh_token", "access_expires_at"):

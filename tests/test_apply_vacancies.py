@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import sys
 import types
@@ -5,12 +6,18 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+from requests import Request, Response
+from requests.cookies import RequestsCookieJar
 
 openai_module = types.ModuleType("openai")
 openai_module.OpenAI = object
 sys.modules.setdefault("openai", openai_module)
 
-from hh_applicant_tool.operations.apply_vacancies import Operation
+from hh_applicant_tool.api.errors import CaptchaRequired
+from hh_applicant_tool.operations.apply_vacancies import (
+    CaptchaSolveError,
+    Operation,
+)
 from hh_applicant_tool.operations.apply_vacancies import (
     validate_apply_delays,
 )
@@ -32,13 +39,17 @@ USER = {
 
 
 class FakeApiClient:
-    def __init__(self, descriptions):
+    def __init__(self, descriptions, *, get_error=None, post_error=None):
         self.descriptions = descriptions
+        self.get_error = get_error
+        self.post_error = post_error
         self.post_calls = []
         self.put_calls = []
 
     def get(self, path, *args, **kwargs):
         if path.startswith("/vacancies/"):
+            if self.get_error is not None:
+                raise self.get_error
             vacancy_id = path.rsplit("/", 1)[-1]
             return {"description": self.descriptions[vacancy_id]}
         raise AssertionError(f"Unexpected GET path: {path}")
@@ -46,6 +57,8 @@ class FakeApiClient:
     def post(self, path, params, delay=None):
         assert path == "/negotiations"
         self.post_calls.append({"params": params, "delay": delay})
+        if self.post_error is not None:
+            raise self.post_error
         return {}
 
     def put(self, path, *args, **kwargs):
@@ -128,9 +141,20 @@ def make_vacancy(
     }
 
 
-def make_operation(vacancies, descriptions, *, dry_run=False):
+def make_operation(
+    vacancies,
+    descriptions,
+    *,
+    dry_run=False,
+    get_error=None,
+    post_error=None,
+):
     storage = StorageFacade(sqlite3.connect(":memory:"))
-    api_client = FakeApiClient(descriptions)
+    api_client = FakeApiClient(
+        descriptions,
+        get_error=get_error,
+        post_error=post_error,
+    )
     tool = SimpleNamespace(
         storage=storage,
         api_client=api_client,
@@ -153,8 +177,31 @@ def make_operation(vacancies, descriptions, *, dry_run=False):
     operation.skip_tests = False
     operation.work_format = ["REMOTE"]
     operation._vacancy_description_cache = {}
+    operation._captcha_ai = None
     operation._get_vacancies = lambda resume_id=None: iter(vacancies)
     return operation, tool, api_client
+
+
+def make_captcha_error(
+    state="challenge-state",
+    url=None,
+):
+    response = Response()
+    response.status_code = 403
+    response.request = Request("GET", "https://api.hh.ru/me").prepare()
+    return CaptchaRequired(
+        response,
+        {
+            "errors": [
+                {
+                    "type": "captcha_required",
+                    "value": "captcha_required",
+                    "captcha_url": url
+                    or "https://hh.ru/account/captcha?state=" + state,
+                }
+            ]
+        },
+    )
 
 
 def test_skips_duplicate_vacancies_by_title_and_description(caplog):
@@ -326,6 +373,223 @@ def test_cancel_event_stops_apply_loop():
     operation._apply_resume(RESUME, USER, seen_employers={"501"})
 
     assert api_client.post_calls == []
+
+
+def test_captcha_on_vacancy_description_is_not_swallowed():
+    captcha_error = make_captcha_error()
+    vacancy = make_vacancy("101")
+    operation, _, api_client = make_operation(
+        [vacancy],
+        {},
+        get_error=captcha_error,
+    )
+
+    with pytest.raises(CaptchaRequired):
+        operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert api_client.post_calls == []
+
+
+def test_captcha_on_apply_stops_remaining_vacancies():
+    captcha_error = make_captcha_error()
+    vacancies = [make_vacancy("101"), make_vacancy("202")]
+    operation, _, api_client = make_operation(
+        vacancies,
+        {"101": "Description 101", "202": "Description 202"},
+        post_error=captcha_error,
+    )
+
+    with pytest.raises(CaptchaRequired):
+        operation._apply_resume(RESUME, USER, seen_employers={"501"})
+
+    assert len(api_client.post_calls) == 1
+
+
+def test_get_captcha_ai_uses_shared_env_and_disables_reasoning(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://vision.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "vision/test-model")
+    monkeypatch.setenv("OPENAI_REASONING", "xhigh")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    operation = Operation()
+    operation._captcha_ai = None
+    operation.tool = SimpleNamespace(
+        config={},
+        openai_session=SimpleNamespace(proxies={}),
+    )
+
+    class FakeVisionClient:
+        def __init__(self, config):
+            self.config = config
+
+    monkeypatch.setattr(
+        "hh_applicant_tool.operations.apply_vacancies.OpenRouterChatClient",
+        lambda config: FakeVisionClient(config),
+    )
+
+    client = operation._get_captcha_ai()
+
+    assert client is operation._captcha_ai
+    assert client.config.api_key == "test-key"
+    assert client.config.base_url == "https://vision.example/v1"
+    assert client.config.model == "vision/test-model"
+    assert client.config.temperature == 0.0
+    assert client.config.max_completion_tokens == 20
+    assert client.config.reasoning_enabled is False
+    assert client.config.reasoning_effort is None
+
+
+def test_captcha_url_is_redacted_and_external_host_is_rejected():
+    assert (
+        Operation._safe_captcha_url(
+            "https://hh.ru/account/captcha?state=secret"
+        )
+        == "https://hh.ru/account/captcha"
+    )
+    operation = Operation()
+    operation.tool = SimpleNamespace(
+        session=SimpleNamespace(cookies=[]),
+        config={},
+    )
+
+    with pytest.raises(CaptchaSolveError, match="недопустимый адрес"):
+        operation._handle_captcha_required(
+            make_captcha_error(
+                url="https://attacker.example/account/captcha?state=secret"
+            )
+        )
+
+
+def test_captcha_url_rejects_nonstandard_port_and_userinfo():
+    operation = Operation()
+
+    for captcha_url in (
+        "https://hh.ru:8443/account/captcha?state=secret",
+        "https://user@hh.ru/account/captcha?state=secret",
+    ):
+        with pytest.raises(CaptchaSolveError, match="недопустимый адрес"):
+            operation._handle_captcha_required(
+                make_captcha_error(url=captcha_url)
+            )
+
+
+def test_playwright_captcha_flow_uses_image_and_syncs_only_hh_cookies(
+    monkeypatch,
+):
+    calls = {}
+
+    class FakeImage:
+        async def screenshot(self):
+            return b"captcha-image"
+
+    class FakeLocator:
+        async def is_visible(self):
+            return False
+
+    class FakePage:
+        async def goto(self, url, **kwargs):
+            calls["url"] = url
+            calls["goto_kwargs"] = kwargs
+            return SimpleNamespace(status=200)
+
+        async def wait_for_selector(self, selector, **kwargs):
+            calls["image_selector"] = selector
+            return FakeImage()
+
+        async def fill(self, selector, text):
+            calls["fill"] = (selector, text)
+
+        async def press(self, selector, key):
+            calls["press"] = (selector, key)
+
+        async def wait_for_load_state(self, state, **kwargs):
+            calls["load_state"] = state
+
+        def locator(self, selector):
+            calls["verify_selector"] = selector
+            return FakeLocator()
+
+    class FakeContext:
+        async def add_cookies(self, cookies):
+            calls["added_cookies"] = cookies
+
+        async def new_page(self):
+            return FakePage()
+
+        async def cookies(self):
+            return [
+                {
+                    "name": "captcha_session",
+                    "value": "accepted",
+                    "domain": ".hh.ru",
+                    "path": "/",
+                    "httpOnly": True,
+                },
+                {
+                    "name": "foreign",
+                    "value": "ignored",
+                    "domain": "attacker.example",
+                    "path": "/",
+                },
+            ]
+
+    class FakeBrowser:
+        async def new_context(self):
+            return FakeContext()
+
+        async def close(self):
+            calls["closed"] = True
+
+    class FakeChromium:
+        async def launch(self, **kwargs):
+            calls["launch"] = kwargs
+            return FakeBrowser()
+
+    class FakePlaywright:
+        async def __aenter__(self):
+            return SimpleNamespace(chromium=FakeChromium())
+
+        async def __aexit__(self, *args):
+            return None
+
+    playwright_module = types.ModuleType("playwright")
+    playwright_module.__path__ = []
+    async_api_module = types.ModuleType("playwright.async_api")
+    async_api_module.async_playwright = FakePlaywright
+    async_api_module.TimeoutError = type("TimeoutError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "playwright", playwright_module)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", async_api_module)
+
+    class FakeVisionClient:
+        def solve_captcha(self, image_bytes):
+            calls["ocr_image"] = image_bytes
+            return "A1B2"
+
+    operation = Operation()
+    operation._captcha_ai = FakeVisionClient()
+    operation.tool = SimpleNamespace(
+        session=SimpleNamespace(cookies=RequestsCookieJar()),
+    )
+
+    solved = asyncio.run(
+        operation._solve_hh_captcha_async(
+            "https://hh.ru/account/captcha?state=secret"
+        )
+    )
+
+    assert solved is True
+    assert calls["launch"] == {"headless": True}
+    assert calls["image_selector"] == Operation.SEL_CAPTCHA_IMAGE
+    assert calls["ocr_image"] == b"captcha-image"
+    assert calls["fill"] == (Operation.SEL_CAPTCHA_INPUT, "A1B2")
+    assert calls["press"] == (Operation.SEL_CAPTCHA_INPUT, "Enter")
+    assert calls["closed"] is True
+    synced = list(operation.tool.session.cookies)
+    assert [(cookie.name, cookie.domain) for cookie in synced] == [
+        ("captcha_session", ".hh.ru")
+    ]
 
 
 def test_env_excluded_keywords_do_not_skip_non_matching_vacancy_name():

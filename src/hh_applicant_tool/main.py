@@ -27,7 +27,6 @@ from . import api, utils
 from .context import HHProfileContext
 from .storage import StorageFacade
 from .utils.cookiejar import HHOnlyCookieJar
-from .utils.find import find_key
 from .utils.log import setup_logger
 
 DEFAULT_CONFIG_DIR = utils.get_config_path() / (__package__ or "").replace(

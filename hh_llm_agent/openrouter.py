@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import time
@@ -278,6 +279,55 @@ class OpenRouterChatClient:
         messages.append({"role": "user", "content": message})
         reply = self._create(messages)
         return reply.content
+
+    def solve_captcha(self, image_bytes: bytes) -> str:
+        """Read CAPTCHA text from an image using a vision-capable model."""
+        if not image_bytes:
+            raise OpenRouterError("CAPTCHA image is empty.")
+
+        image_data = base64.b64encode(image_bytes).decode("ascii")
+        request = {
+            "model": self.config.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Распознай текст на изображении. Верни только текст, "
+                        "без объяснений и дополнительных символов."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{image_data}"
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": "Распознай текст на изображении.",
+                        },
+                    ],
+                },
+            ],
+            # OCR should be deterministic and must not inherit OPENAI_REASONING;
+            # some OpenAI-compatible vision endpoints reject reasoning options.
+            "temperature": 0.0,
+            "max_completion_tokens": 20,
+            "stream": False,
+            "timeout": 45.0,
+        }
+        try:
+            response = self._send_request(request)
+        except Exception as ex:
+            self._raise_request_error(ex)
+
+        message = response.choices[0].message
+        if message.content is None:
+            return ""
+        return self._normalize_content(message.content)
 
     def complete_json(
         self,

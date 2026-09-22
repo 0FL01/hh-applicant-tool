@@ -56,7 +56,7 @@ RUN touch /var/log/cron.log && chown docker:docker /var/log/cron.log && \
 # spool переустанавливаем на старте: репозиторий подмонтирован volume-ом .:/app,
 # и запечённый при сборке spool иначе молча рассинхронизируется с /app/crontab.
 # dos2unix нужен и здесь: bind-mount аннулирует build-time конвертацию.
-CMD printenv | grep -E 'CONFIG_DIR|HH_PROFILE_ID' > /etc/environment && \
+CMD printenv | grep -E 'CONFIG_DIR|HH_PROFILE_ID|HH_APPLY_ON_STARTUP' > /etc/environment && \
   mkdir -p /app/config && \
   chown -R docker:docker /app/config && \
   dos2unix /app/crontab && \

@@ -158,6 +158,115 @@ def test_api_client_does_not_refresh_before_local_expiry():
     assert len(session.calls) == 1
 
 
+def test_api_client_solves_captcha_and_retries_request_once():
+    captcha_url = "https://hh.ru/account/captcha?state=private-state"
+    session = FakeSession(
+        [
+            FakeResponse(
+                403,
+                {
+                    "errors": [
+                        {
+                            "type": "captcha_required",
+                            "value": "captcha_required",
+                            "captcha_url": captcha_url,
+                        }
+                    ]
+                },
+            ),
+            FakeResponse(200, {"items": []}),
+        ]
+    )
+    client = ApiClient(session=session, delay=0)
+    handled = []
+    handler = lambda ex: handled.append(ex.captcha_url)
+
+    with client.handle_captcha(handler):
+        assert client.get("/me") == {"items": []}
+    assert handled == [captcha_url]
+    assert len(session.calls) == 2
+    assert session.calls[0][:2] == session.calls[1][:2]
+
+
+def test_api_client_does_not_retry_a_repeated_captcha():
+    session = FakeSession(
+        [
+            FakeResponse(
+                403,
+                {
+                    "errors": [
+                        {
+                            "type": "captcha_required",
+                            "value": "captcha_required",
+                            "captcha_url": "https://hh.ru/account/captcha?state=one",
+                        }
+                    ]
+                },
+            ),
+            FakeResponse(
+                403,
+                {
+                    "errors": [
+                        {
+                            "type": "captcha_required",
+                            "value": "captcha_required",
+                            "captcha_url": "https://hh.ru/account/captcha?state=two",
+                        }
+                    ]
+                },
+            ),
+        ]
+    )
+    client = ApiClient(session=session, delay=0)
+    handled = []
+    handler = lambda ex: handled.append(ex.captcha_url)
+
+    try:
+        with client.handle_captcha(handler):
+            client.get("/me")
+    except errors.CaptchaRequired as ex:
+        assert ex.captcha_url.endswith("state=two")
+    else:
+        raise AssertionError("Expected repeated CAPTCHA to abort the request")
+
+    assert len(handled) == 1
+    assert len(session.calls) == 2
+
+
+def test_api_client_does_not_retry_when_captcha_handler_fails():
+    session = FakeSession(
+        [
+            FakeResponse(
+                403,
+                {
+                    "errors": [
+                        {
+                            "type": "captcha_required",
+                            "value": "captcha_required",
+                            "captcha_url": "https://hh.ru/account/captcha?state=one",
+                        }
+                    ]
+                },
+            ),
+            FakeResponse(200, {"items": []}),
+        ]
+    )
+    client = ApiClient(session=session, delay=0)
+
+    def abort(_challenge):
+        raise RuntimeError("CAPTCHA was not solved")
+
+    try:
+        with client.handle_captcha(abort):
+            client.get("/me")
+    except RuntimeError as ex:
+        assert str(ex) == "CAPTCHA was not solved"
+    else:
+        raise AssertionError("Expected solver failure to abort the request")
+
+    assert len(session.calls) == 1
+
+
 def test_api_client_passes_timeout_to_requests_session():
     session = FakeSession([FakeResponse(200, {"items": []})])
     client = ApiClient(

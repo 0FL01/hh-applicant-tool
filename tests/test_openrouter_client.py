@@ -1,3 +1,4 @@
+import base64
 import sys
 import types
 
@@ -349,3 +350,65 @@ def test_generic_openai_response_preserves_reasoning_content():
     assert reply.reasoning_details == [
         {"type": "reasoning.text", "text": "Checked the request."}
     ]
+
+
+def test_solve_captcha_sends_image_without_reasoning_parameters():
+    client = FakeClient([FakeResponse(" ABC 123 ")])
+    chat = OpenRouterChatClient(
+        config=type(
+            "Cfg",
+            (),
+            {
+                "base_url": "https://proxy.example/v1",
+                "api_key": "token",
+                "model": "cx/gpt-6-luna",
+                "temperature": 0.7,
+                "max_completion_tokens": 1000,
+                "request_interval_seconds": 0.0,
+                "max_retries_on_rate_limit": 0,
+                "rate_limit_retry_base_seconds": 0.0,
+                "reasoning_enabled": True,
+                "reasoning_effort": "xhigh",
+            },
+        )(),
+        client=client,
+    )
+
+    assert chat.solve_captcha(b"captcha-png") == "ABC 123"
+
+    request = client.chat.completions.calls[0]
+    assert request["model"] == "cx/gpt-6-luna"
+    assert request["temperature"] == 0.0
+    assert request["max_completion_tokens"] == 20
+    assert request["stream"] is False
+    assert request["timeout"] == 45.0
+    assert "reasoning_effort" not in request
+    assert "extra_body" not in request
+    image = request["messages"][1]["content"][0]["image_url"]["url"]
+    assert image == "data:image/png;base64," + base64.b64encode(
+        b"captcha-png"
+    ).decode("ascii")
+
+
+def test_solve_captcha_rejects_empty_image():
+    chat = OpenRouterChatClient(
+        config=type(
+            "Cfg",
+            (),
+            {
+                "base_url": "https://proxy.example/v1",
+                "api_key": "token",
+                "model": "cx/gpt-6-luna",
+                "temperature": 0.0,
+                "max_completion_tokens": 20,
+                "request_interval_seconds": 0.0,
+                "max_retries_on_rate_limit": 0,
+                "rate_limit_retry_base_seconds": 0.0,
+                "reasoning_enabled": False,
+            },
+        )(),
+        client=FakeClient([]),
+    )
+
+    with pytest.raises(OpenRouterError, match="image is empty"):
+        chat.solve_captcha(b"")

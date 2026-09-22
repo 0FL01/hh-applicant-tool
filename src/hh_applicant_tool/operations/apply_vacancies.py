@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import html
 import logging
@@ -15,17 +16,18 @@ from typing import TYPE_CHECKING, Any, Iterator
 from urllib.parse import urlparse
 
 import requests
+from requests.cookies import create_cookie
 
-from .. import utils
+from ..api import BadResponse, Redirect, datatypes
+from ..api.datatypes import PaginatedItems, SearchVacancy
+from ..api.errors import ApiError, CaptchaRequired, LimitExceeded
 from hh_llm_agent.config import (
+    DEFAULT_OPENROUTER_BASE_URL,
     OpenRouterConfig,
     load_openai_env,
     parse_reasoning_effort,
 )
 from hh_llm_agent.openrouter import OpenRouterChatClient, OpenRouterError
-from ..api import BadResponse, Redirect, datatypes
-from ..api.datatypes import PaginatedItems, SearchVacancy
-from ..api.errors import ApiError, LimitExceeded
 from ..main import BaseNamespace, BaseOperation
 from ..storage.repositories.errors import RepositoryError
 from ..utils.datatypes import VacancyTestsData
@@ -43,6 +45,10 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__package__)
+
+
+class CaptchaSolveError(RuntimeError):
+    """A CAPTCHA could not be solved safely; stop the current apply run."""
 
 
 def validate_apply_delays(delay_min: float, delay_max: float) -> None:
@@ -119,6 +125,8 @@ class Operation(BaseOperation):
 
     __aliases__ = ("apply", "apply-similar")
     excluded_keywords_env_name = "HH_APPLY_EXCLUDED_KEYWORDS"
+    SEL_CAPTCHA_IMAGE = 'img[data-qa="account-captcha-picture"]'
+    SEL_CAPTCHA_INPUT = 'input[data-qa="account-captcha-input"]'
     ai_filter: str | None = None
     ai_rate_limit: int = 0
     apply_delay_min: float = 30.0
@@ -424,7 +432,7 @@ class Operation(BaseOperation):
     def run(
         self,
         tool: HHApplicantTool,
-    ) -> None:
+    ) -> None | int:
         self.tool = tool
         args = self.args
         env_force_message = self._parse_env_bool(
@@ -567,7 +575,23 @@ class Operation(BaseOperation):
             if self.ai_filter
             else None
         )
-        self._apply_vacancies()
+        self._captcha_ai: OpenRouterChatClient | None = None
+        api_client = tool.api_client
+        try:
+            with api_client.handle_captcha(self._handle_captcha_required):
+                self._apply_vacancies()
+        except CaptchaRequired as ex:
+            logger.error(
+                "HH продолжает требовать CAPTCHA после одной попытки; "
+                "рассылка остановлена (%s)",
+                self._safe_captcha_url(ex.captcha_url),
+            )
+            return 1
+        except CaptchaSolveError as ex:
+            logger.error(
+                "Не удалось решить CAPTCHA; рассылка остановлена: %s", ex
+            )
+            return 1
 
     def _apply_vacancies(self) -> None:
         resumes: list[datatypes.Resume] = self.tool.get_resumes()
@@ -966,6 +990,8 @@ class Operation(BaseOperation):
                                 f"Произошла непредвиденная ошибка: {ex}"
                             )
                             continue
+                    except (CaptchaRequired, CaptchaSolveError):
+                        raise
                     except Exception as ex:
                         logger.error(f"Произошла непредвиденная ошибка: {ex}")
                         continue
@@ -1060,6 +1086,8 @@ class Operation(BaseOperation):
             except LimitExceeded:
                 do_apply = False
                 logger.warning("Достигли лимита на отклики")
+            except (CaptchaRequired, CaptchaSolveError):
+                raise
             except ApiError as ex:
                 logger.warning(ex)
             except (BadResponse, OpenRouterError) as ex:
@@ -1076,6 +1104,246 @@ class Operation(BaseOperation):
     def vacancy_filter_ai(self) -> OpenRouterChatClient:
         assert self._vacancy_filter_ai is not None
         return self._vacancy_filter_ai
+
+    def _get_captcha_ai(self) -> OpenRouterChatClient:
+        if self._captcha_ai is not None:
+            return self._captcha_ai
+
+        captcha_config = self.tool.config.get("openai_captcha", {})
+        openai_config = self.tool.config.get("openai", {})
+        openai_env = load_openai_env()
+        api_key = (
+            captcha_config.get("api_key")
+            or openai_config.get("token")
+            or self.tool.config.get("api_key")
+            or openai_env.api_key
+        )
+        if not api_key:
+            raise CaptchaSolveError(
+                "Для CAPTCHA нужен API-ключ: задайте OPENAI_API_KEY "
+                "или openai_captcha.api_key."
+            )
+
+        base_url = (
+            captcha_config.get("base_url")
+            or openai_config.get("completion_endpoint")
+            or self.tool.config.get("openai_base_url")
+            or openai_env.base_url
+        )
+        model = (
+            captcha_config.get("model")
+            or openai_config.get("model")
+            or getenv("HH_CAPTCHA_MODEL")
+            or openai_env.model
+        )
+        if not model:
+            raise CaptchaSolveError(
+                "Для CAPTCHA задайте vision-модель через OPENAI_MODEL "
+                "или openai_captcha.model."
+            )
+
+        captcha_proxies: dict[str, str] | None = None
+        if (
+            hasattr(self.tool, "openai_session")
+            and self.tool.openai_session.proxies
+        ):
+            proxies = self.tool.openai_session.proxies
+            if proxies.get("http") or proxies.get("https"):
+                captcha_proxies = dict(proxies)
+
+        self._captcha_ai = OpenRouterChatClient(
+            OpenRouterConfig(
+                api_key=api_key,
+                base_url=base_url or DEFAULT_OPENROUTER_BASE_URL,
+                model=model,
+                temperature=0.0,
+                max_completion_tokens=20,
+                reasoning_enabled=False,
+                reasoning_effort=None,
+                proxies=captcha_proxies,
+            )
+        )
+        return self._captcha_ai
+
+    @staticmethod
+    def _safe_captcha_url(captcha_url: str | None) -> str:
+        if not captcha_url:
+            return "<URL отсутствует>"
+        parsed = urlparse(captcha_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            return "<недопустимый URL CAPTCHA>"
+        return f"https://{parsed.hostname}{parsed.path}"
+
+    @staticmethod
+    def _is_hh_cookie_domain(domain: str) -> bool:
+        return bool(
+            re.fullmatch(
+                r"(?:[A-Za-z0-9-]+\.)*hh\.(?:ru|kz|uz|by|net|com)",
+                domain.lstrip("."),
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _get_playwright_cookies(self) -> list[dict[str, Any]]:
+        cookies: list[dict[str, Any]] = []
+        for cookie in self.tool.session.cookies:
+            if not cookie.domain or not self._is_hh_cookie_domain(
+                cookie.domain
+            ):
+                continue
+            if cookie.is_expired():
+                continue
+
+            playwright_cookie: dict[str, Any] = {
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": cookie.domain,
+                "path": cookie.path or "/",
+                "secure": bool(cookie.secure),
+                "httpOnly": "HttpOnly" in getattr(cookie, "_rest", {}),
+            }
+            if cookie.expires is not None and cookie.expires > 0:
+                playwright_cookie["expires"] = float(cookie.expires)
+            same_site = getattr(cookie, "_rest", {}).get("SameSite")
+            if same_site in {"Strict", "Lax", "None"}:
+                playwright_cookie["sameSite"] = same_site
+            cookies.append(playwright_cookie)
+        return cookies
+
+    def _merge_playwright_cookies(self, cookies: list[dict[str, Any]]) -> None:
+        for cookie in cookies:
+            domain = str(cookie.get("domain") or "").lstrip(".")
+            if not domain or not self._is_hh_cookie_domain(domain):
+                continue
+
+            expires = cookie.get("expires")
+            rest: dict[str, Any] = {}
+            if cookie.get("httpOnly"):
+                rest["HttpOnly"] = True
+            if cookie.get("sameSite") in {"Strict", "Lax", "None"}:
+                rest["SameSite"] = cookie["sameSite"]
+            self.tool.session.cookies.set_cookie(
+                create_cookie(
+                    name=cookie["name"],
+                    value=cookie["value"],
+                    domain=cookie["domain"],
+                    path=cookie.get("path") or "/",
+                    secure=bool(cookie.get("secure")),
+                    expires=(int(expires) if expires and expires > 0 else None),
+                    rest=rest,
+                )
+            )
+
+    def _handle_captcha_required(self, challenge: CaptchaRequired) -> None:
+        captcha_url = challenge.captcha_url
+        parsed = urlparse(captcha_url or "")
+        try:
+            port = parsed.port
+        except ValueError:
+            port = -1
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "hh.ru"
+            or port not in {None, 443}
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path.rstrip("/") != "/account/captcha"
+        ):
+            raise CaptchaSolveError(
+                "HH вернул недопустимый адрес CAPTCHA; запрос не повторялся."
+            )
+
+        try:
+            solved = asyncio.run(self._solve_hh_captcha_async(captcha_url))
+        except CaptchaSolveError:
+            raise
+        except Exception as ex:
+            raise CaptchaSolveError(
+                f"Браузер CAPTCHA завершился ошибкой ({type(ex).__name__})."
+            ) from ex
+
+        if not solved:
+            raise CaptchaSolveError("Vision-модель не распознала CAPTCHA.")
+        logger.info(
+            "CAPTCHA решена; один раз повторяю исходный API-запрос (%s)",
+            self._safe_captcha_url(captcha_url),
+        )
+
+    async def _solve_hh_captcha_async(self, captcha_url: str) -> bool:
+        try:
+            from playwright.async_api import (
+                TimeoutError as PlaywrightTimeoutError,
+                async_playwright,
+            )
+        except ImportError as ex:
+            raise CaptchaSolveError(
+                "Для решения CAPTCHA нужны Playwright и Chromium."
+            ) from ex
+
+        captcha_ai = self._get_captcha_ai()
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            try:
+                context = await browser.new_context()
+                existing_cookies = self._get_playwright_cookies()
+                if existing_cookies:
+                    await context.add_cookies(existing_cookies)
+
+                page = await context.new_page()
+                response = await page.goto(
+                    captcha_url,
+                    wait_until="domcontentloaded",
+                    timeout=30_000,
+                )
+                if response is not None and response.status >= 400:
+                    raise CaptchaSolveError(
+                        f"Страница CAPTCHA вернула HTTP {response.status}."
+                    )
+
+                captcha_image = await page.wait_for_selector(
+                    self.SEL_CAPTCHA_IMAGE,
+                    timeout=10_000,
+                    state="visible",
+                )
+                image_bytes = await captcha_image.screenshot()
+                captcha_text = await asyncio.to_thread(
+                    captcha_ai.solve_captcha,
+                    image_bytes,
+                )
+                if not captcha_text:
+                    raise CaptchaSolveError(
+                        "Vision-модель вернула пустой текст CAPTCHA."
+                    )
+
+                await page.fill(self.SEL_CAPTCHA_INPUT, captcha_text)
+                await page.press(self.SEL_CAPTCHA_INPUT, "Enter")
+                try:
+                    await page.wait_for_load_state(
+                        "networkidle",
+                        timeout=15_000,
+                    )
+                except PlaywrightTimeoutError:
+                    # Some HH pages keep background requests open; success is
+                    # established by the challenge form disappearing below.
+                    pass
+
+                if await page.locator(self.SEL_CAPTCHA_IMAGE).is_visible():
+                    raise CaptchaSolveError(
+                        "HH не принял ответ CAPTCHA; API-запрос не повторяется."
+                    )
+
+                self._merge_playwright_cookies(await context.cookies())
+                return True
+            except CaptchaSolveError:
+                raise
+            except OpenRouterError as ex:
+                raise CaptchaSolveError(f"Vision API error: {ex}") from ex
+            except Exception as ex:
+                raise CaptchaSolveError(
+                    f"Не удалось пройти страницу CAPTCHA ({type(ex).__name__})."
+                ) from ex
+            finally:
+                await browser.close()
 
     def _save_skipped_vacancy(self, vacancy: SearchVacancy, resume_id: str) -> None:
         employer = vacancy.get("employer", {})
@@ -1284,6 +1552,8 @@ class Operation(BaseOperation):
         try:
             vacancy_details = self.api_client.get(f"/vacancies/{vacancy_id}")
             description = vacancy_details.get("description") or ""
+        except CaptchaRequired:
+            raise
         except ApiError as ex:
             logger.warning(
                 "Не удалось загрузить описание вакансии %s: %s",

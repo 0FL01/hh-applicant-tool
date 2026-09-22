@@ -25,9 +25,17 @@ log "Running startup tasks..."
 
 run_step "refresh-token" /usr/local/bin/python -m hh_applicant_tool refresh-token
 run_step "update-resumes" /usr/local/bin/python -m hh_applicant_tool update-resumes
-# Тот же лок, что в crontab: recreate/restart поднимает cron заново, @reboot
-# запускает startup.sh, и его волна не должна идти параллельно с часовой.
-# --max-responses 15 как в cron: стартовая волна тоже не должна пулемётить.
-run_step "apply-vacancies" /usr/bin/flock -n /tmp/hh_apply.lock /usr/local/bin/python -m hh_applicant_tool apply-vacancies --max-responses 15
+
+# Редеплой/перезапуск контейнера не должен сам запускать новую волну откликов.
+# Запланированные запуски остаются в crontab; стартовую волну можно включить явно.
+startup_apply="${HH_APPLY_ON_STARTUP:-false}"
+case "${startup_apply,,}" in
+  1|true|yes|on)
+    run_step "apply-vacancies" /usr/bin/flock -n /tmp/hh_apply.lock /usr/local/bin/python -m hh_applicant_tool apply-vacancies --max-responses 15
+    ;;
+  *)
+    log "[SKIP] apply-vacancies (HH_APPLY_ON_STARTUP=false)"
+    ;;
+esac
 
 log "Startup tasks finished."
